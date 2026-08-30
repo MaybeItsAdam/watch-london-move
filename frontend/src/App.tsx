@@ -28,13 +28,19 @@ import {
 import type { BasemapMode } from './config';
 import { DAYLIGHT_POLL_MS, daylightPhase } from './daylight';
 import type { DaylightPhase } from './daylight';
+import { currentPosition } from './geolocate';
 import { LOD_MIN_ZOOM, bucketFleet, buildVehicleLayers, vehicleLighting } from './layers';
-import type { ModelLayerBuilder } from './layers';
-import { useAppActive, useNativeShell } from './lifecycle';
+import type { FleetBuckets, ModelLayerBuilder } from './layers';
+import { useAndroidBack, useAppActive, useNativeShell } from './lifecycle';
 import { setRouteCollection } from './route-paths';
 import { loadStops, startRouteGeometry } from './static-data';
+import { loadPrefs, savePrefs, type Prefs } from './prefs';
+import { parseUrlState, shareableUrl, writeUrlState, type UrlState } from './url-state';
 import { useVehicles } from './useVehicles';
+import type { FrameHandler } from './useVehicles';
 import { InfoPanel } from './components/InfoPanel';
+import { Legend } from './components/Legend';
+import { MapControls } from './components/MapControls';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
 import type {
@@ -47,6 +53,19 @@ import type {
 } from './types';
 
 const EMPTY_COLLECTION: FeatureCollection = { type: 'FeatureCollection', features: [] };
+
+/** Placeholder until the first animation frame has run. */
+const EMPTY_ROWS: VehicleRow[] = [];
+
+// Read once at module scope, before the first render: the map is constructed in
+// an effect that runs after it, and seeding the camera from a link has to
+// happen there rather than as a fly-to afterwards — otherwise a shared link
+// visibly starts somewhere else and travels.
+const INITIAL_URL_STATE = parseUrlState(window.location.search);
+const INITIAL_PREFS = loadPrefs();
+
+/** How long the camera must be still before its position reaches the URL. */
+const URL_WRITE_DEBOUNCE_MS = 400;
 const NO_HIGHLIGHT_FILTER: ExpressionSpecification = ['==', ['get', 'line'], '__none__'];
 // Rows re-derive every animation frame; the sidebar list only needs to be
 // roughly live, so it is rebuilt on a timer instead.
@@ -174,12 +193,52 @@ function routeArrowImage(): ImageData | null {
   return ctx.getImageData(0, 0, size, size);
 }
 
+/** Everything below is added by this app rather than by the basemap style. */
+const APP_SOURCE_IDS = ['routes', 'stops', 'highlight-route'] as const;
+const APP_LAYER_IDS = [
+  'routes-base',
+  'routes-casing',
+  'routes-highlight',
+  'routes-arrows',
+  'stops-dots',
+  'highlight-route',
+] as const;
+
+/**
+ * Drop anything this app previously added, so `installMapLayers` can run twice
+ * without throwing.
+ *
+ * `setStyle` normally tears all of it down for us, which is why installation
+ * hangs off `style.load` at all. But that is MapLibre's guarantee, not ours: a
+ * `style.load` that fires without a preceding teardown — a diffed style update,
+ * a failed swap that recovers, a future MapLibre — would hit `addSource` on an
+ * id that already exists, which throws and leaves the map with no vehicle
+ * layers at all. Layers first, then sources: MapLibre refuses to remove a
+ * source that a layer still references.
+ */
+function removeAppStyle(map: maplibregl.Map) {
+  for (const id of APP_LAYER_IDS) {
+    if (map.getLayer(id)) {
+      map.removeLayer(id);
+    }
+  }
+  for (const id of APP_SOURCE_IDS) {
+    if (map.getSource(id)) {
+      map.removeSource(id);
+    }
+  }
+}
+
 /**
  * Everything this app adds to the map style. Extracted from the `load` handler
  * because `setStyle` tears all of it down: swapping the basemap at dusk has to
  * put the sources, layers, images and the deck overlay back.
+ *
+ * Idempotent — see `removeAppStyle`.
  */
 function installMapLayers(map: maplibregl.Map, phase: DaylightPhase, routes: FeatureCollection) {
+  removeAppStyle(map);
+
   if (!map.hasImage('route-arrow')) {
     const arrow = routeArrowImage();
     if (arrow) {
@@ -313,26 +372,33 @@ function App() {
   // — route data, filters, visibility — re-run against the new style.
   const [styleEpoch, setStyleEpoch] = useState(0);
   const [routesLoaded, setRoutesLoaded] = useState(false);
-  const [showRoutes, setShowRoutes] = useState(true);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showRoutes, setShowRoutes] = useState(INITIAL_PREFS.showRoutes);
+  const [selectedId, setSelectedId] = useState<string | null>(INITIAL_URL_STATE.selectedId);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [following, setFollowing] = useState(false);
-  const [basemapMode, setBasemapMode] = useState<BasemapMode>('auto');
+  const [basemapMode, setBasemapMode] = useState<BasemapMode>(INITIAL_URL_STATE.basemap ?? 'auto');
   const [sunPhase, setSunPhase] = useState<DaylightPhase>(() => daylightPhase());
   // Open on a desktop, where it sits beside the map; closed on a phone, where
   // it is a sheet covering half of it and the map is the point.
-  const [sidebarOpen, setSidebarOpen] = useState(!IS_NARROW);
+  const [sidebarOpen, setSidebarOpen] = useState(INITIAL_PREFS.sidebarOpen ?? !IS_NARROW);
   const [search, setSearch] = useState('');
   // Empty means "every line"; otherwise only these route ids are shown.
-  const [selectedLines, setSelectedLines] = useState<string[]>([]);
-  const [filters, setFilters] = useState<Record<FilterKey, boolean>>({
-    bus: true,
-    tube: true,
-    overground: true,
-    dlr: true,
-    tram: true,
-    elizabeth: true,
-  });
+  const [selectedLines, setSelectedLines] = useState<string[]>(INITIAL_URL_STATE.selectedLines);
+  const [filters, setFilters] = useState<Record<FilterKey, boolean>>(
+    INITIAL_URL_STATE.filters ?? {
+      bus: true,
+      tube: true,
+      overground: true,
+      dlr: true,
+      tram: true,
+      elizabeth: true,
+    },
+  );
+  // The camera, mirrored out of MapLibre so it can be written to the URL. A ref
+  // rather than state: it changes on every frame of a pan and nothing renders
+  // from it.
+  const cameraRef = useRef<UrlState['camera']>(INITIAL_URL_STATE.camera);
+  const [legendDismissed, setLegendDismissed] = useState(INITIAL_PREFS.legendDismissed);
   const [models, setModels] = useState<VehicleModels | null>(null);
   // The builder arrives with the lazily-imported model module; until it does,
   // `buildVehicleLayers` stays in its dot band whatever the zoom is.
@@ -349,6 +415,15 @@ function App() {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
 
+  // Mirrored for the URL writer, which runs on a timer and from map events —
+  // both outside the render that last knew these values.
+  const selectedLinesRef = useRef(selectedLines);
+  selectedLinesRef.current = selectedLines;
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  const basemapModeRef = useRef(basemapMode);
+  basemapModeRef.current = basemapMode;
+
   // The highlight effect below reacts to selectedId, so clearing it is enough.
   const clearSelection = useCallback(() => {
     setSelectedId(null);
@@ -364,7 +439,7 @@ function App() {
     [clearSelection],
   );
 
-  const { rows, connectionStatus, lastPayloadAt, api, setViewport } =
+  const { subscribeFrames, connectionStatus, lastPayloadAt, api, setViewport } =
     useVehicles(handleVehicleRemoved);
 
   // Dismiss the native splash as soon as the basemap is up. It used to wait for
@@ -410,14 +485,20 @@ function App() {
     // A fly-in from a flatter, wider framing reads as arriving over the city
     // rather than cutting to it. Reduced-motion users get the destination.
     const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // A link names a place. Arriving anywhere else first and then travelling
+    // there would be a worse answer to "look at this" than simply being there,
+    // so a camera in the URL suppresses the fly-in the same way reduced motion
+    // does.
+    const linked = INITIAL_URL_STATE.camera;
 
     styleUrlRef.current = MAP_STYLES[phaseRef.current];
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
       style: MAP_STYLES[phaseRef.current],
-      center: [-0.1276, 51.5072],
-      zoom: reduceMotion ? INITIAL_ZOOM : INITIAL_ZOOM - 2.2,
-      pitch: reduceMotion ? 55 : 20,
+      center: linked ? [linked.lon, linked.lat] : [-0.1276, 51.5072],
+      zoom: linked ? linked.zoom : reduceMotion ? INITIAL_ZOOM : INITIAL_ZOOM - 2.2,
+      bearing: linked ? linked.bearing : 0,
+      pitch: linked ? linked.pitch : reduceMotion ? 55 : 20,
       // TfL's open data terms require the vehicle feed to be attributed. It goes
       // in MapLibre's attribution control rather than our own chrome so it sits
       // beside the basemap's OpenStreetMap credit — where anyone looking for
@@ -467,6 +548,14 @@ function App() {
         south: bounds.getSouth(),
         east: bounds.getEast(),
         north: bounds.getNorth(),
+      };
+      const center = map.getCenter();
+      cameraRef.current = {
+        lon: center.lng,
+        lat: center.lat,
+        zoom,
+        bearing: map.getBearing(),
+        pitch: map.getPitch(),
       };
     };
     trackCamera();
@@ -582,7 +671,7 @@ function App() {
 
     map.on('load', () => {
       setMapReady(true);
-      if (!reduceMotion) {
+      if (!reduceMotion && !linked) {
         map.easeTo({ zoom: INITIAL_ZOOM, pitch: 55, duration: 2600, essential: true });
       }
     });
@@ -868,30 +957,166 @@ function App() {
 
     trail?.setData(EMPTY_COLLECTION);
     setHighlight(lineFilterExpression ?? NO_HIGHLIGHT_FILTER);
-  }, [mapReady, routesLoaded, selectedId, selectedLines, phase, styleEpoch, api]);
+    // `lastPayloadAt` is in the dependency list so the breadcrumb trail is
+    // redrawn as points arrive. Without it the trail was painted once, at the
+    // moment of selection, and then never again.
+  }, [
+    mapReady,
+    routesLoaded,
+    selectedId,
+    selectedLines,
+    phase,
+    styleEpoch,
+    api,
+    lastPayloadAt,
+  ]);
+
+  // Record a breadcrumb trail for the selected vehicle only — see `trackTrail`.
+  useEffect(() => {
+    api.trackTrail(selectedId);
+  }, [api, selectedId]);
+
+  // Preferences: how the user likes the app, kept out of the shareable link.
+  useEffect(() => {
+    const prefs: Prefs = { sidebarOpen, showRoutes, legendDismissed };
+    savePrefs(prefs);
+  }, [sidebarOpen, showRoutes, legendDismissed]);
+
+  /**
+   * The state as it should appear in the address bar. The camera is read from a
+   * ref at write time rather than tracked as state — it changes on every frame
+   * of a pan, and a render per frame is exactly what the rest of this file
+   * works to avoid.
+   */
+  const urlState = useCallback(
+    (): UrlState => ({
+      camera: cameraRef.current,
+      selectedId: selectedIdRef.current,
+      selectedLines: selectedLinesRef.current,
+      filters: filtersRef.current,
+      basemap: basemapModeRef.current,
+    }),
+    [],
+  );
+
+  // Anything a link should carry, written on a debounce. `moveend` alone is not
+  // enough — a selection or a filter change moves nothing — so the same writer
+  // is driven from both the map and React state.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) {
+      return;
+    }
+    let timer = 0;
+    const schedule = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => writeUrlState(urlState()), URL_WRITE_DEBOUNCE_MS);
+    };
+    schedule();
+    map.on('moveend', schedule);
+    return () => {
+      window.clearTimeout(timer);
+      map.off('moveend', schedule);
+    };
+  }, [mapReady, urlState, selectedId, selectedLines, filters, basemapMode]);
 
   const lineFilter = useMemo(() => new Set(selectedLines), [selectedLines]);
 
-  // Filter and bucket in a single pass. This runs every animation frame, since
-  // interpolation rebuilds the rows regardless, so it replaces what used to be
-  // four full scans of the fleet with one.
-  const fleet = useMemo(
-    () =>
-      bucketFleet(rows, (vehicle) => {
+  // While a vehicle is selected, its route is the subject and everything else
+  // steps back — the only way one bus route is legible in central London.
+  const focusLine = useMemo(() => {
+    const vehicle = selectedId ? api.getDisplayed(selectedId) : null;
+    return vehicle ? routeLineId(vehicle) : null;
+  }, [selectedId, api]);
+
+  // Last frame's buckets, so `bucketFleet` can hand back the same arrays when
+  // the membership has not moved — which is what stops deck.gl invalidating
+  // every attribute of every layer. See `reconcile` in ./layers.
+  const fleetRef = useRef<FleetBuckets | null>(null);
+  const rowsRef = useRef<VehicleRow[]>(EMPTY_ROWS);
+  const visibleCountRef = useRef(0);
+
+  /**
+   * Everything the frame handler needs that is owned by React. Rebuilt on each
+   * render — a few a second at most — and read on each frame, so the handler
+   * itself can stay stable and out of the dependency graph entirely.
+   */
+  const frameInputs = {
+    filters,
+    lineFilter,
+    models,
+    buildModels,
+    selectedId,
+    hoveredId,
+    focusLine,
+    handleSelect,
+    handleHover,
+  };
+  const frameInputsRef = useRef(frameInputs);
+  frameInputsRef.current = frameInputs;
+
+  /**
+   * The whole per-frame path, outside React.
+   *
+   * Filter and bucket in a single pass — interpolation re-derives the poses
+   * regardless, so this replaces what used to be four full scans of the fleet —
+   * then hand the layers straight to deck.gl. This used to be a `useMemo` plus
+   * an effect, reached by re-rendering `App` sixty times a second; now the rAF
+   * loop calls it directly and React renders only when something a human can
+   * see has changed.
+   */
+  const onFrame = useCallback<FrameHandler>((rows, positionEpoch) => {
+    rowsRef.current = rows;
+    const {
+      filters: activeFilters,
+      lineFilter: activeLines,
+      models: activeModels,
+      buildModels: activeBuildModels,
+      selectedId: activeSelectedId,
+      hoveredId: activeHoveredId,
+      focusLine: activeFocusLine,
+      handleSelect: onSelect,
+      handleHover: onHover,
+    } = frameInputsRef.current;
+
+    const fleet = bucketFleet(
+      rows,
+      (vehicle) => {
         const group = filterKeyForType(vehicle.type);
-        if (!group || !filters[group]) {
+        if (!group || !activeFilters[group]) {
           return false;
         }
-        return lineFilter.size === 0 || lineFilter.has(routeLineId(vehicle));
-      }),
-    [rows, filters, lineFilter],
-  );
-  const visibleRows = fleet.all;
+        return activeLines.size === 0 || activeLines.has(routeLineId(vehicle));
+      },
+      fleetRef.current,
+    );
+    fleetRef.current = fleet;
+    visibleCountRef.current = fleet.all.length;
 
-  // Rebuilt on a timer rather than per frame: this drives the sidebar list and
-  // its counts, both of which would otherwise re-render 60 times a second.
-  const rowsRef = useRef(rows);
-  rowsRef.current = rows;
+    const overlay = overlayRef.current;
+    if (!overlay) {
+      return;
+    }
+    // zoomRef (not a one-shot getZoom) so the level of detail tracks the camera.
+    overlay.setProps({
+      layers: buildVehicleLayers({
+        models: activeModels,
+        fleet,
+        zoom: zoomRef.current,
+        onSelect,
+        onHover,
+        selectedId: activeSelectedId,
+        hoveredId: activeHoveredId,
+        focusLine: activeFocusLine,
+        bounds: boundsRef.current,
+        positionEpoch,
+        buildModels: activeBuildModels,
+      }),
+    });
+  }, []);
+
+  useEffect(() => subscribeFrames(onFrame), [subscribeFrames, onFrame]);
+
   const [lines, setLines] = useState<LineSummary[]>([]);
 
   useEffect(() => {
@@ -946,11 +1171,35 @@ function App() {
   // between seconds the memoised components below can actually bail out, which
   // is what keeps the sidebar's several-hundred-row list out of every frame.
   const [nowSecond, setNowSecond] = useState(() => Date.now());
+  // The status bar's vehicle count. Counted every frame, published once a
+  // second: it is a number in a corner, not something worth a render at 60Hz.
+  const [visibleCount, setVisibleCount] = useState(0);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNowSecond(Date.now()), 1000);
+    const timer = window.setInterval(() => {
+      setNowSecond(Date.now());
+      setVisibleCount(visibleCountRef.current);
+    }, 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  /**
+   * Why the map is empty, or null when it is not. Read on the 1Hz clock — this
+   * is explanatory copy, not something to reconsider sixty times a second.
+   */
+  const emptyReason = useMemo(() => {
+    void nowSecond;
+    if (connectionStatus !== 'connected' || visibleCount > 0) {
+      return null;
+    }
+    if (FILTER_ORDER.every((key) => !filters[key])) {
+      return 'Every mode is hidden. Turn one back on in the filters.';
+    }
+    if (selectedLines.length > 0) {
+      return 'No vehicles on the selected routes are in view right now.';
+    }
+    return 'No vehicles in view. Try zooming out, or panning back over London.';
+  }, [nowSecond, connectionStatus, visibleCount, filters, selectedLines]);
 
   // A Map lookup on the same 1Hz clock, not `rows.find` on every frame: the scan
   // was 6,500 string comparisons a frame to locate one vehicle, and it handed
@@ -1007,13 +1256,6 @@ function App() {
     }
   }, [selectedId, filters, selectedLines, api, clearSelection]);
 
-  // While a vehicle is selected, its route is the subject and everything else
-  // steps back — the only way one bus route is legible in central London.
-  const focusLine = useMemo(() => {
-    const vehicle = selectedId ? api.getDisplayed(selectedId) : null;
-    return vehicle ? routeLineId(vehicle) : null;
-  }, [selectedId, api]);
-
   const isolatedRoute =
     focusLine !== null && selectedLines.length === 1 && selectedLines[0] === focusLine;
 
@@ -1030,6 +1272,86 @@ function App() {
   // arrow here is a new function on every one of the app's ~60 renders a second,
   // which would make every `memo` comparison fail and put the sidebar's whole
   // line list back into the frame.
+  const [locating, setLocating] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+
+  /** Centre on the user. See ./geolocate for why this is not `navigator.geolocation`. */
+  const handleLocate = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map) {
+      return;
+    }
+    setLocating(true);
+    const position = await currentPosition();
+    setLocating(false);
+    if (!position) {
+      return;
+    }
+    map.easeTo({
+      center: position,
+      zoom: Math.max(map.getZoom(), 14.5),
+      duration: 1200,
+      essential: true,
+    });
+  }, []);
+
+  const handleShare = useCallback(async () => {
+    const url = shareableUrl(urlState());
+    // The URL writer is on a debounce, so a share taken immediately after a pan
+    // would otherwise hand over the previous camera.
+    writeUrlState(urlState());
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Watch London Move', url });
+        return;
+      } catch {
+        // Cancelled, or unsupported for this payload — fall through to copying.
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 2000);
+    } catch {
+      // No clipboard permission. The link is in the address bar either way.
+    }
+  }, [urlState]);
+
+  // Android back unwinds what is on screen before it leaves the app: the legend,
+  // then the selected vehicle, then the sidebar over a phone-sized map. Ordered
+  // most-recently-opened first, which is the order they were put there in.
+  useAndroidBack([
+    () => {
+      if (legendDismissed) {
+        return false;
+      }
+      setLegendDismissed(true);
+      return true;
+    },
+    () => {
+      if (!selectedIdRef.current) {
+        return false;
+      }
+      clearSelection();
+      return true;
+    },
+    () => {
+      if (!sidebarOpen || !IS_NARROW) {
+        return false;
+      }
+      setSidebarOpen(false);
+      return true;
+    },
+  ]);
+
+  const showLegend = useCallback(() => setLegendDismissed(false), []);
+  const dismissLegend = useCallback(() => setLegendDismissed(true), []);
+
+  /** Show exactly this route, replacing any current line selection. */
+  const focusLineOnMap = useCallback((id: string) => {
+    setSelectedLines([id]);
+  }, []);
+
   const toggleSidebar = useCallback(() => setSidebarOpen((value) => !value), []);
   const toggleMode = useCallback((key: FilterKey) => {
     setFilters((previous) => ({ ...previous, [key]: !previous[key] }));
@@ -1072,38 +1394,6 @@ function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [clearSelection]);
-
-  useEffect(() => {
-    if (!overlayRef.current) {
-      return;
-    }
-    // zoomRef (not a one-shot getZoom) so the level of detail tracks the camera:
-    // this effect already re-runs on every rAF tick via `fleet`.
-    overlayRef.current.setProps({
-      layers: buildVehicleLayers({
-        models,
-        fleet,
-        zoom: zoomRef.current,
-        onSelect: handleSelect,
-        onHover: handleHover,
-        selectedId,
-        hoveredId,
-        focusLine,
-        bounds: boundsRef.current,
-        buildModels,
-      }),
-    });
-  }, [
-    fleet,
-    models,
-    buildModels,
-    handleSelect,
-    handleHover,
-    selectedId,
-    hoveredId,
-    focusLine,
-    styleEpoch,
-  ]);
 
   // Follow mode: one rAF loop owns the camera for as long as it runs. Centre
   // and zoom go out together in a single jumpTo per frame — an easeTo mixed in
@@ -1207,6 +1497,22 @@ function App() {
           <strong>Basemap unavailable.</strong> Vehicles are still live.
         </div>
       ) : null}
+      {/* An empty map is ambiguous: filtered to nothing, panned off London, or
+          broken. Only shown once the feed is up, so it never contradicts the
+          status bar during the opening handshake. */}
+      {emptyReason ? (
+        <div className="empty-notice panel" role="status">
+          {emptyReason}
+        </div>
+      ) : null}
+      <MapControls
+        onLocate={handleLocate}
+        locating={locating}
+        onShare={handleShare}
+        shareCopied={shareCopied}
+        onShowLegend={showLegend}
+      />
+      {legendDismissed ? null : <Legend onDismiss={dismissLegend} />}
       <Sidebar
         open={sidebarOpen}
         onToggleOpen={toggleSidebar}
@@ -1218,6 +1524,7 @@ function App() {
         lines={lines}
         selectedLines={selectedLines}
         onToggleLine={toggleLine}
+        onFocusLine={focusLineOnMap}
         onClearLines={clearLines}
         showRoutes={showRoutes}
         onToggleRoutes={toggleRoutes}
@@ -1238,7 +1545,7 @@ function App() {
       ) : null}
       <StatusBar
         status={connectionStatus}
-        vehicleCount={visibleRows.length}
+        vehicleCount={visibleCount}
         lastPayloadAt={lastPayloadAt}
         now={nowSecond}
         shifted={sidebarOpen}

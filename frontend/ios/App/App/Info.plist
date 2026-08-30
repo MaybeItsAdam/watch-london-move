@@ -24,6 +24,13 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- Required by the "centre the map on my location" control. iOS terminates
+	     an app that asks for location without this key present, so it is not
+	     optional even though the feature is. Wording is what the system prompt
+	     shows verbatim, and the app never stores or transmits the position:
+	     it is read once, per tap, to move the camera. -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Used only to centre the map on where you are. Your location is never stored or sent anywhere.</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

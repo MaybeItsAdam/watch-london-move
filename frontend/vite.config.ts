@@ -97,20 +97,36 @@ export default defineConfig(({ mode }) => {
       rolldownOptions: {
         output: {
           // Everything used to ship as one ~2.1MB chunk, so a phone parsed the
-          // glTF stack before it could draw a single dot. maplibre is the one
-          // dependency worth pinning to its own chunk: it is large, it changes on
-          // its own schedule, and every session needs it.
+          // glTF stack before it could draw a single dot. The rule for pinning a
+          // dependency to its own chunk is that it is large, it versions on its
+          // own schedule, and every session needs it — which is true of maplibre
+          // and of deck.gl's core and 2D layers.
           //
-          // Deliberately nothing else. Grouping all of @deck.gl into one chunk
-          // pulls @deck.gl/mesh-layers — and with it @loaders.gl/gltf — back into
-          // the eager graph, which is exactly what src/model-layers.ts exists to
-          // keep out of it.
+          // What is *not* safe is grouping all of @deck.gl together: that pulls
+          // @deck.gl/mesh-layers, and with it @loaders.gl/gltf, back into the
+          // eager graph, which is exactly what src/model-layers.ts exists to keep
+          // out of it. Hence the per-package matches below.
           manualChunks(id: string) {
             if (!id.includes('node_modules')) {
               return undefined
             }
             if (id.includes('maplibre-gl')) {
               return 'maplibre'
+            }
+            // deck.gl's core and 2D layers are roughly half of what is left in
+            // the index chunk, they version on their own schedule, and every
+            // session needs them — the same argument maplibre wins on. Matched
+            // by exact package rather than by '@deck.gl', which is the trap the
+            // comment above describes: '@deck.gl/mesh-layers' would come with
+            // it and drag @loaders.gl/gltf back into the eager graph, undoing
+            // the dynamic import in src/model-layers.ts. '@deck.gl/layers' is
+            // not a substring of '@deck.gl/mesh-layers', so these are safe.
+            if (
+              id.includes('@deck.gl/core') ||
+              id.includes('@deck.gl/layers') ||
+              id.includes('@deck.gl/mapbox')
+            ) {
+              return 'deckgl'
             }
             // Named only so it is identifiable in a bundle report and in the
             // service worker's asset list; it is already split by the dynamic

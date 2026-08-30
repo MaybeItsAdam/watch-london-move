@@ -77,39 +77,123 @@ export type FleetBuckets = {
   rail: VehicleRow[];
 };
 
+const BUCKET_KEYS = ['all', 'bus', 'tram', 'dlr', 'elizabeth', 'rail'] as const;
+type BucketKey = (typeof BUCKET_KEYS)[number];
+
+/**
+ * Scratch space for the bucketing pass, reused across frames. Rows are written
+ * in here first and only copied out when membership actually changed, so a
+ * steady fleet costs no allocation at all.
+ */
+const scratch: Record<BucketKey, VehicleRow[]> = {
+  all: [],
+  bus: [],
+  tram: [],
+  dlr: [],
+  elizabeth: [],
+  rail: [],
+};
+const scratchLength: Record<BucketKey, number> = {
+  all: 0,
+  bus: 0,
+  tram: 0,
+  dlr: 0,
+  elizabeth: 0,
+  rail: 0,
+};
+
+function collect(key: BucketKey, row: VehicleRow) {
+  scratch[key][scratchLength[key]] = row;
+  scratchLength[key] += 1;
+}
+
+/**
+ * Hand back the previous array when the membership is identical, and a fresh
+ * one when it is not.
+ *
+ * The identity of this array is load-bearing. deck.gl compares `props.data`
+ * by reference (`diffDataProps` in @deck.gl/core), and on any change it calls
+ * `attributeManager.invalidateAll()` — which re-runs *every* accessor over
+ * *every* row, `updateTriggers` notwithstanding. Returning a new array each
+ * frame, as this used to, therefore made the `updateTriggers` below dead code
+ * and re-derived colour, radius and text sixty times a second for a fleet
+ * whose colours had not changed. Reusing the array when nothing joined or left
+ * is what lets the triggers finally do their job; positions still reach the
+ * GPU because `getPosition` carries its own per-frame trigger.
+ *
+ * The comparison is a reference check per row, not a deep one: `updateRow`
+ * mutates the row objects in place, so a row that is still in the fleet is
+ * still the same object.
+ */
+function reconcile(previous: VehicleRow[] | undefined, key: BucketKey): VehicleRow[] {
+  const buffer = scratch[key];
+  const length = scratchLength[key];
+  if (previous && previous.length === length) {
+    let same = true;
+    for (let i = 0; i < length; i += 1) {
+      if (previous[i] !== buffer[i]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) {
+      return previous;
+    }
+  }
+  const next = new Array<VehicleRow>(length);
+  for (let i = 0; i < length; i += 1) {
+    next[i] = buffer[i];
+  }
+  return next;
+}
+
 /**
  * Apply the sidebar filters and split the fleet by model shape in one pass.
  * This runs on every animation frame — positions interpolate, so the rows are
  * rebuilt regardless — which is why it is one pass and not the filter plus
  * three `Array.filter` scans it replaces.
+ *
+ * `previous` is last frame's result. Each bucket that still holds exactly the
+ * same rows is handed back unchanged, so the common case — a fleet that is
+ * moving but whose membership only turns over on a server payload — produces
+ * no new arrays and no deck.gl attribute invalidation.
  */
 export function bucketFleet(
   rows: VehicleRow[],
   include: (row: VehicleRow) => boolean,
+  previous?: FleetBuckets | null,
 ): FleetBuckets {
-  const buckets: FleetBuckets = {
-    all: [],
-    bus: [],
-    tram: [],
-    dlr: [],
-    elizabeth: [],
-    rail: [],
-  };
+  for (const key of BUCKET_KEYS) {
+    scratchLength[key] = 0;
+  }
+
   for (const row of rows) {
     if (!include(row)) {
       continue;
     }
-    buckets.all.push(row);
-    const bucket = buckets[row.type as keyof FleetBuckets];
+    collect('all', row);
     // `all` is not a vehicle type, so a type colliding with it would be a bug
     // rather than a bucket; every other key is one of the model shapes.
-    if (Array.isArray(bucket) && row.type !== 'all') {
-      bucket.push(row);
+    const type = row.type as BucketKey;
+    if (type !== 'all' && type in scratch) {
+      collect(type, row);
     } else {
-      buckets.rail.push(row);
+      collect('rail', row);
     }
   }
-  return buckets;
+
+  const buckets = {} as FleetBuckets;
+  let reusedEverything = previous != null;
+  for (const key of BUCKET_KEYS) {
+    const next = reconcile(previous?.[key], key);
+    buckets[key] = next;
+    if (previous?.[key] !== next) {
+      reusedEverything = false;
+    }
+  }
+  // Nothing joined or left any bucket: hand back the very same object, so
+  // callers holding it as a memo dependency see no change either.
+  return reusedEverything && previous ? previous : buckets;
 }
 
 function hash01(id: string): number {
@@ -121,7 +205,39 @@ function hash01(id: string): number {
   return ((hash >>> 0) % 100000) / 100000;
 }
 
+/**
+ * `hash01` walks the whole id string, and a vehicle's id never changes, so the
+ * label ranking memoises it. Bounded because ids leave the fleet and never come
+ * back: past the cap the table is dropped whole rather than evicted one at a
+ * time, which is cheap and correct — the values are pure functions of the key.
+ */
+const RANK_CACHE_MAX = 20000;
+const rankCache = new Map<string, number>();
+
+function labelRank(row: VehicleRow): number {
+  let rank = rankCache.get(row.id);
+  if (rank === undefined) {
+    if (rankCache.size >= RANK_CACHE_MAX) {
+      rankCache.clear();
+    }
+    rank = hash01(row.id);
+    rankCache.set(row.id, rank);
+  }
+  // Rail is rarer and more informative than a bus, so it wins a contested cell
+  // regardless of hash.
+  return row.type === 'bus' ? rank : rank - 1;
+}
+
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+// Reused across calls; `chooseLabels` clears them on entry and nothing outlives
+// the call. At street zoom this used to be a fresh Map plus an object per
+// occupied cell, every frame.
+const bestRank = new Map<number, number>();
+const bestRow = new Map<number, VehicleRow>();
+const railSurvivors: VehicleRow[] = [];
+const busSurvivors: VehicleRow[] = [];
+const byLabelRank = (a: VehicleRow, b: VehicleRow) => labelRank(a) - labelRank(b);
 
 /**
  * Pick which vehicles get a route blind. Labels over-plot far faster than
@@ -137,7 +253,8 @@ function chooseLabels(
   bounds: Bounds | null,
 ): VehicleRow[] {
   const cellDeg = LABEL_CELL_DEG_AT_ZOOM_0 / Math.pow(2, zoom);
-  const bestPerCell = new Map<number, { row: VehicleRow; rank: number }>();
+  bestRank.clear();
+  bestRow.clear();
   let selected: VehicleRow | null = null;
 
   for (const row of rows) {
@@ -163,12 +280,13 @@ function chooseLabels(
       (Math.floor(row.position[0] / cellDeg) + 32768) * 65536 +
       Math.floor(row.position[1] / cellDeg) +
       32768;
-    // Rail is rarer and more informative than a bus, so it wins a contested
-    // cell regardless of hash.
-    const rank = hash01(row.id) - (row.type === 'bus' ? 0 : 1);
-    const existing = bestPerCell.get(cell);
-    if (!existing || rank < existing.rank) {
-      bestPerCell.set(cell, { row, rank });
+    const rank = labelRank(row);
+    const existing = bestRank.get(cell);
+    // Two parallel maps rather than one map of {row, rank}: the object was an
+    // allocation per occupied cell per call, and neither half outlives the call.
+    if (existing === undefined || rank < existing) {
+      bestRank.set(cell, rank);
+      bestRow.set(cell, row);
     }
   }
 
@@ -177,10 +295,9 @@ function chooseLabels(
     labels.push(selected);
   }
 
-  const survivors = [...bestPerCell.values()];
-  if (survivors.length <= MAX_LABELS) {
-    for (const entry of survivors) {
-      labels.push(entry.row);
+  if (bestRow.size <= MAX_LABELS) {
+    for (const row of bestRow.values()) {
+      labels.push(row);
     }
     return labels;
   }
@@ -189,24 +306,117 @@ function chooseLabels(
   // set and taking the top slice would spend the entire budget on rail and
   // never label a bus. The budget is split instead, and either side's unclaimed
   // share falls to the other.
-  const rail = survivors.filter((entry) => entry.row.type !== 'bus').sort((a, b) => a.rank - b.rank);
-  const bus = survivors.filter((entry) => entry.row.type === 'bus').sort((a, b) => a.rank - b.rank);
-  const railBudget = Math.min(rail.length, Math.round(MAX_LABELS * 0.55));
-  const busBudget = Math.min(bus.length, MAX_LABELS - railBudget);
-
-  for (const entry of rail.slice(0, MAX_LABELS - busBudget)) {
-    labels.push(entry.row);
+  railSurvivors.length = 0;
+  busSurvivors.length = 0;
+  for (const row of bestRow.values()) {
+    (row.type === 'bus' ? busSurvivors : railSurvivors).push(row);
   }
-  for (const entry of bus.slice(0, busBudget)) {
-    labels.push(entry.row);
+  railSurvivors.sort(byLabelRank);
+  busSurvivors.sort(byLabelRank);
+  const railBudget = Math.min(railSurvivors.length, Math.round(MAX_LABELS * 0.55));
+  const busBudget = Math.min(busSurvivors.length, MAX_LABELS - railBudget);
+  const railTake = Math.min(railSurvivors.length, MAX_LABELS - busBudget);
+
+  for (let i = 0; i < railTake; i += 1) {
+    labels.push(railSurvivors[i]);
+  }
+  for (let i = 0; i < busBudget; i += 1) {
+    labels.push(busSurvivors[i]);
   }
   return labels;
+}
+
+/**
+ * Label placement, throttled.
+ *
+ * Which vehicles carry a blind is deliberately hash-stable so labels do not hop
+ * between neighbours — which also means the answer barely changes between one
+ * frame and the next, and recomputing it at 60Hz bought nothing. Their
+ * *positions* are not throttled: the rows in the returned array are the live
+ * vehicle objects, and the TextLayer's `getPosition` carries the per-frame
+ * epoch, so a label tracks its vehicle smoothly regardless of this interval.
+ *
+ * Returning the same array between recomputes matters as much as skipping the
+ * work: it is what keeps deck.gl from re-rasterising the label atlas — see
+ * `reconcile`.
+ */
+const LABEL_REFRESH_MS = 250;
+let labelsAt = 0;
+let labelsResult: VehicleRow[] = [];
+let labelsRows: VehicleRow[] | null = null;
+let labelsSelectedId: string | null = null;
+
+function labelsFor(
+  rows: VehicleRow[],
+  zoom: number,
+  selectedId: string | null,
+  bounds: Bounds | null,
+): VehicleRow[] {
+  const now = performance.now();
+  // `rows` changes identity exactly when the fleet's membership does, so a
+  // vehicle that has left never lingers in a stale label set.
+  if (
+    labelsRows === rows &&
+    labelsSelectedId === selectedId &&
+    now - labelsAt < LABEL_REFRESH_MS
+  ) {
+    return labelsResult;
+  }
+  labelsAt = now;
+  labelsRows = rows;
+  labelsSelectedId = selectedId;
+  labelsResult = chooseLabels(rows, zoom, selectedId, bounds);
+  return labelsResult;
 }
 
 /** White or near-black, whichever the livery can carry. */
 function labelInk(livery: [number, number, number]): [number, number, number] {
   const luminance = (0.2126 * livery[0] + 0.7152 * livery[1] + 0.0722 * livery[2]) / 255;
   return luminance > 0.6 ? [16, 20, 32] : [255, 255, 255];
+}
+
+type StateAccessors = {
+  isDimmed: (row: VehicleRow) => boolean;
+  vehicleColor: (row: VehicleRow) => [number, number, number, number];
+  emphasis: (row: VehicleRow) => boolean;
+  labelInkFor: (row: VehicleRow) => [number, number, number];
+  labelBackgroundFor: (row: VehicleRow) => [number, number, number, number];
+};
+
+/**
+ * The selection/focus-dependent accessors, rebuilt only when the state they
+ * close over changes.
+ *
+ * deck.gl invokes these when an `updateTriggers` entry fires, which is exactly
+ * when this cache misses — so building them per frame only ever produced
+ * garbage for the frames on which nothing called them.
+ */
+let accessorCacheKey: string | null = null;
+let accessorCache: StateAccessors | null = null;
+
+function accessorsFor(
+  key: string,
+  selectedId: string | null,
+  hoveredId: string | null,
+  focusLine: string | null,
+): StateAccessors {
+  if (accessorCache && accessorCacheKey === key) {
+    return accessorCache;
+  }
+  const isDimmed = (row: VehicleRow) => focusLine !== null && routeLineId(row) !== focusLine;
+  const vehicleColor = (row: VehicleRow): [number, number, number, number] => {
+    const [r, g, b] = vehicleLivery(row);
+    return [r, g, b, isDimmed(row) ? DIMMED_ALPHA : 255];
+  };
+  const emphasis = (row: VehicleRow) => row.id === selectedId || row.id === hoveredId;
+  const labelInkFor = (row: VehicleRow) => labelInk(vehicleLivery(row));
+  const labelBackgroundFor = (row: VehicleRow): [number, number, number, number] => {
+    const [r, g, b] = vehicleLivery(row);
+    return [r, g, b, isDimmed(row) ? 60 : 235];
+  };
+  accessorCache = { isDimmed, vehicleColor, emphasis, labelInkFor, labelBackgroundFor };
+  accessorCacheKey = key;
+  return accessorCache;
 }
 
 export type VehicleLayerOptions = {
@@ -221,6 +431,14 @@ export type VehicleLayerOptions = {
   focusLine: string | null;
   /** Current viewport, used to keep the label budget on screen. */
   bounds: Bounds | null;
+  /**
+   * Bumped once per animation frame. It is the only `updateTriggers` entry that
+   * fires every frame, and it is deliberately wired to the position accessors
+   * alone: poses change continuously, liveries do not. Without it a stable
+   * `data` array would leave the fleet frozen on screen; with it applied to
+   * everything, the stable array would buy nothing.
+   */
+  positionEpoch: number;
   /** Injected once `./model-layers` has been dynamically imported; until then
    *  the map stays in its dot band regardless of zoom. */
   buildModels: ModelLayerBuilder | null;
@@ -235,6 +453,7 @@ export type ModelLayerBuilder = (params: {
   onClick: (info: { object?: VehicleRow }) => void;
   onHover: (info: { object?: VehicleRow }) => void;
   colorTrigger: string;
+  positionEpoch: number;
 }) => Layer[];
 
 export function buildVehicleLayers({
@@ -247,6 +466,7 @@ export function buildVehicleLayers({
   hoveredId,
   focusLine,
   bounds,
+  positionEpoch,
   buildModels,
 }: VehicleLayerOptions) {
   const modelOpacity = clamp01((zoom - LOD_MIN_ZOOM) / (LOD_MAX_ZOOM - LOD_MIN_ZOOM));
@@ -258,12 +478,16 @@ export function buildVehicleLayers({
   // basemap full of orange roads, and against the models it is fading into.
   const dotScale = 1 + clamp01((zoom - 10) / (LOD_MAX_ZOOM - 10)) * 0.6;
 
-  const isDimmed = (row: VehicleRow) => focusLine !== null && routeLineId(row) !== focusLine;
-  const vehicleColor = (row: VehicleRow): [number, number, number, number] => {
-    const [r, g, b] = vehicleLivery(row);
-    return [r, g, b, isDimmed(row) ? DIMMED_ALPHA : 255];
-  };
-  const emphasis = (row: VehicleRow) => row.id === selectedId || row.id === hoveredId;
+  // Accessors that read selection or focus have to be re-evaluated when those
+  // change, but not otherwise. That is only true as long as `data` keeps its
+  // identity between frames — see `reconcile` above for why. With that holding,
+  // this is what keeps a 6,500-row colour upload off every frame.
+  const stateTrigger = `${selectedId}|${hoveredId}|${focusLine}`;
+  // The accessors themselves are cached on the same key rather than rebuilt per
+  // frame: deck.gl only calls them when a trigger fires, so a fresh closure per
+  // frame was six function objects a frame that nothing invoked.
+  const state = accessorsFor(stateTrigger, selectedId, hoveredId, focusLine);
+  const { vehicleColor, emphasis } = state;
 
   const handleClick = ({ object }: { object?: VehicleRow }) => {
     if (object) {
@@ -273,10 +497,6 @@ export function buildVehicleLayers({
   const handleHover = ({ object }: { object?: VehicleRow }) => {
     onHover(object ?? null);
   };
-  // Accessors that read selection or focus have to be re-evaluated when those
-  // change, but not otherwise — deck.gl only recomputes an attribute when its
-  // trigger does, so this is what keeps a 6,500-row upload off every frame.
-  const stateTrigger = `${selectedId}|${hoveredId}|${focusLine}`;
 
   const layers: Layer[] = [];
 
@@ -301,7 +521,13 @@ export function buildVehicleLayers({
         pickable: true,
         onClick: handleClick,
         onHover: handleHover,
-        updateTriggers: { getRadius: stateTrigger, getFillColor: stateTrigger },
+        updateTriggers: {
+          getPosition: positionEpoch,
+          // Radius reads `dotScale`, which tracks the camera, so the zoom band
+          // has to be part of its trigger or the dots stop growing as you zoom.
+          getRadius: `${stateTrigger}|${dotScale.toFixed(3)}`,
+          getFillColor: stateTrigger,
+        },
       }),
     );
   }
@@ -317,12 +543,13 @@ export function buildVehicleLayers({
         onClick: handleClick,
         onHover: handleHover,
         colorTrigger: stateTrigger,
+        positionEpoch,
       }),
     );
   }
 
   if (zoom >= LABEL_MIN_ZOOM) {
-    const labelled = chooseLabels(fleet.all, zoom, selectedId, bounds);
+    const labelled = labelsFor(fleet.all, zoom, selectedId, bounds);
     layers.push(
       new TextLayer<VehicleRow>({
         id: 'vehicle-labels',
@@ -342,15 +569,16 @@ export function buildVehicleLayers({
         getBorderColor: [255, 255, 255, 190],
         getPosition: (d) => d.position,
         getText: (d) => vehicleLabel(d),
-        getColor: (d) => labelInk(vehicleLivery(d)),
-        getBackgroundColor: (d) => {
-          const [r, g, b] = vehicleLivery(d);
-          return [r, g, b, isDimmed(d) ? 60 : 235];
-        },
+        getColor: state.labelInkFor,
+        getBackgroundColor: state.labelBackgroundFor,
         // Labels are decoration for the vehicle beneath them; picking one would
         // shadow the model it names.
         pickable: false,
-        updateTriggers: { getBackgroundColor: stateTrigger },
+        updateTriggers: {
+          getPosition: positionEpoch,
+          getColor: stateTrigger,
+          getBackgroundColor: stateTrigger,
+        },
       }),
     );
   }

@@ -14,11 +14,25 @@
      configured, which it is not in the shipped builds — crash reports. If any
      of that changes, this array is the first thing that has to change with it.
 
+     Location is the one entry someone will expect to find here and should not
+     add. The app reads an approximate position when — and only when — the user
+     presses the "centre the map on my location" control, uses it immediately to
+     move the camera, and never stores or transmits it. Apple's "collect" means
+     transmitted off the device, so this stays empty. What location *does*
+     require is the NSLocationWhenInUseUsageDescription string in Info.plist,
+     which is there. Adding a data type here that the app does not collect would
+     be as inaccurate as omitting one that it does.
+
   2. NSPrivacyAccessedAPITypes covers the "required reason" APIs the Capacitor
      runtime and WKWebView reach for. These are not our calls; they come from
      the framework, and Apple still requires the host app to declare them.
      Re-check this list when a Capacitor plugin is added or upgraded — a new
      plugin reaching a new category is the usual cause of a surprise rejection.
+
+     @capacitor/geolocation was added for the locate control and needs no entry:
+     the required-reason categories are file timestamp, system boot time, disk
+     space, active keyboards and user defaults. CoreLocation is not one of them
+     — it is governed by the Info.plist usage string and the runtime prompt.
 -->
 <plist version="1.0">
 <dict>

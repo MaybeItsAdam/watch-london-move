@@ -141,7 +141,15 @@ textarea {
   background: rgba(8, 12, 22, 0.6);
   color: var(--text);
   font: inherit;
+  /* 16px on touch, where anything smaller makes iOS zoom the whole viewport on
+     focus and never zoom back out. 13px under a mouse, where it does not. */
   font-size: 13px;
+}
+
+@media (pointer: coarse) {
+  .sidebar-search {
+    font-size: 16px;
+  }
 }
 
 .sidebar-search::placeholder {
@@ -220,17 +228,42 @@ textarea {
 }
 
 /* Line / bus route list */
+/* The row pitch is declared once, here, and read back by Sidebar.tsx through
+   getComputedStyle: the list is windowed, and a virtualiser whose idea of the
+   row height disagrees with the stylesheet's drifts a little further out of
+   place with every row it scrolls past. Rows take their height from it rather
+   than from padding so the two cannot disagree. */
 .line-list {
+  --line-row-gap: 2px;
+  --line-row-stride: 30px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--line-row-gap);
   margin: 0 -4px;
   padding: 0 4px;
   border-top: 1px solid var(--panel-border);
   padding-top: 8px;
+}
+
+/* Windowed mode: one spacer holding the full scroll height, with only the
+   visible slice rendered inside it and translated into place. */
+.line-list-sizer {
+  position: relative;
+  flex: none;
+  width: 100%;
+}
+
+.line-list-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--line-row-gap);
 }
 
 .line-empty {
@@ -244,7 +277,9 @@ textarea {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 8px;
+  flex: none;
+  height: calc(var(--line-row-stride) - var(--line-row-gap));
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: none;
@@ -495,6 +530,11 @@ textarea {
   flex: none;
 }
 
+/* Neutral, not red: the opening moment of a session is not a fault. */
+.status-dot.connecting {
+  background: var(--text-dim);
+}
+
 .status-dot.connected {
   background: var(--status-connected);
   box-shadow: 0 0 6px var(--status-connected);
@@ -552,9 +592,12 @@ textarea {
    the sizes below are the 44pt iOS / 48dp Android minimums, which look padded
    and wasteful under a mouse. */
 @media (pointer: coarse) {
+  .line-list {
+    --line-row-stride: 46px;
+  }
+
   .line-row {
-    min-height: 44px;
-    padding: 8px;
+    padding: 0 8px;
   }
 
   .icon-button {
@@ -704,4 +747,175 @@ textarea {
 .basemap-notice strong {
   color: var(--status-reconnecting);
   font-weight: 600;
+}
+
+
+/* ---------------------------------------------------------------------------
+   Focus
+
+   Everything here was on the browser default, which is a thin ring tuned for
+   white pages and is close to invisible over a translucent dark panel sitting
+   on a live map. :focus-visible rather than :focus so a pointer user never sees
+   it and a keyboard user always does.
+   --------------------------------------------------------------------------- */
+.legend-pill:focus-visible,
+.pill-button:focus-visible,
+.line-row:focus-visible,
+.icon-button:focus-visible,
+.segment:focus-visible,
+.link-button:focus-visible,
+.map-control:focus-visible,
+.sidebar-reopen:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Map controls
+   --------------------------------------------------------------------------- */
+.map-controls {
+  position: absolute;
+  /* Clear of MapLibre's own zoom/compass stack, which owns the top right. */
+  right: var(--edge-right);
+  bottom: calc(var(--edge-bottom) + 44px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.map-control {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.map-control:hover {
+  background: var(--panel-hover);
+}
+
+.map-control.busy {
+  color: var(--accent);
+}
+
+.share-toast {
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Legend
+   --------------------------------------------------------------------------- */
+.legend {
+  position: absolute;
+  right: var(--edge-right);
+  top: var(--edge-top);
+  width: min(300px, calc(100vw - 24px));
+  max-height: calc(100% - var(--edge-top) - var(--edge-bottom));
+  overflow-y: auto;
+  padding: 14px;
+  z-index: 30;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.legend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.legend-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.legend-lede {
+  margin: 0 0 12px;
+  color: var(--text-dim);
+}
+
+.legend-modes {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px 10px;
+}
+
+.legend-modes li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.legend-notes {
+  margin: 0;
+}
+
+.legend-notes dt {
+  font-weight: 600;
+  margin-top: 9px;
+}
+
+.legend-notes dd {
+  margin: 1px 0 0;
+  color: var(--text-dim);
+}
+
+.legend-notes kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: rgba(8, 12, 22, 0.6);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+/* The legend would cover the map on a phone, so it sits along the bottom as a
+   sheet — the same shape the sidebar takes there. */
+@media (max-width: 640px) {
+  .legend {
+    right: var(--edge-right);
+    left: var(--edge-left);
+    top: auto;
+    bottom: var(--edge-bottom);
+    width: auto;
+    max-height: 60vh;
+  }
+
+  .map-controls {
+    bottom: calc(var(--edge-bottom) + 96px);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Empty state
+
+   An empty map reads identically whether the filters hid everything, the camera
+   left London, or the feed died. This says which.
+   --------------------------------------------------------------------------- */
+.empty-notice {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(360px, calc(100vw - 48px));
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  text-align: center;
+  z-index: 15;
+  pointer-events: none;
 }

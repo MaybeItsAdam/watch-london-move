@@ -9,7 +9,9 @@
  * a live backend:
  *
  *   public/data/routes.json      the /routes FeatureCollection, coordinates 5dp
- *   public/data/stops.json       every stop in the network, coordinates 5dp
+ *   data-src/stops.json          every stop in the network, coordinates 5dp
+ *   public/data/stops.bin        the same stops as a binary index (see
+ *                                build-stop-index.mjs); this is what ships
  *   src/static-data-manifest.json
  *
  * Measured against the live network (662 lines, 121,405 vertices, 33,118 stops):
@@ -20,6 +22,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildStopIndex } from './build-stop-index.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const backendUrl = (
@@ -234,7 +237,10 @@ async function main() {
 
   await mkdir(join(root, 'public', 'data'), { recursive: true });
   await writeFile(join(root, 'public', 'data', 'routes.json'), routesJson);
-  await writeFile(join(root, 'public', 'data', 'stops.json'), stopsJson);
+  // Outside public/ on purpose: this is the source the binary index is built
+  // from, not something the app fetches. See build-stop-index.mjs.
+  await mkdir(join(root, 'data-src'), { recursive: true });
+  await writeFile(join(root, 'data-src', 'stops.json'), stopsJson);
   await writeFile(
     join(root, 'src', 'static-data-manifest.json'),
     `${JSON.stringify(
@@ -245,10 +251,14 @@ async function main() {
           bytes: Buffer.byteLength(routesJson),
           lines: routes.features.length,
         },
+        // Overwritten immediately below by buildStopIndex, which is what
+        // actually knows the binary's size. Written here so the manifest is
+        // never missing the key, even if the transform fails.
         stops: {
-          path: 'data/stops.json',
-          bytes: Buffer.byteLength(stopsJson),
+          path: 'data/stops.bin',
+          bytes: 0,
           count: stops.length,
+          format: 'binary',
         },
       },
       null,
@@ -256,6 +266,12 @@ async function main() {
     )}\n`,
   );
 
+  // Chained rather than left to the operator: two artefacts describing the same
+  // stops must not be able to drift apart by someone forgetting a second command.
+  const { jsonBytes, binBytes } = await buildStopIndex();
+  console.log(
+    `stops.bin ${(binBytes / 1e6).toFixed(2)} MB from ${(jsonBytes / 1e6).toFixed(2)} MB JSON`,
+  );
   console.log(`manifest builtAt ${new Date(builtAt).toISOString()}`);
 }
 

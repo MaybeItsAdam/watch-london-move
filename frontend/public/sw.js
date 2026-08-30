@@ -1,7 +1,7 @@
 /**
  * Watch London Move — service worker. Web only.
  *
- * A cold start pulls ~5.2 MB of data that never changes within a build: the
+ * A cold start pulls ~3.9 MB of data that never changes within a build: the
  * whole network's route geometry (2.69 MB raw / 650 KB gzip) and slices of a
  * 33,118-stop index. Egress is the dominant hosting cost, so the point of this
  * worker is that the *second* visit spends nothing on any of it.
@@ -45,7 +45,7 @@ const SHELL = `wlm-shell-${SCHEMA}-${BUILD_ID}`;
  * unchanged chunks survive a deploy and orphans do not accumulate.
  */
 const STATIC = `wlm-static-${SCHEMA}`;
-/** The build-time bundled routes.json / stops.json. */
+/** The build-time bundled routes.json / stops.bin. */
 const DATA = `wlm-data-${SCHEMA}`;
 /** Backend /routes and /stops?bbox=. */
 const API = `wlm-api-${SCHEMA}`;
@@ -214,9 +214,9 @@ function route(request) {
     return (event) => cacheFirst(event, STATIC);
   }
 
-  if (path === 'data/routes.json' || path === 'data/stops.json') {
+  if (path === 'data/routes.json' || path === 'data/stops.bin') {
     // Same argument, by a different mechanism: these carry `?v=<builtAt>`, so a
-    // given URL's bytes never change. This is the 5.2 MB the whole worker is
+    // given URL's bytes never change. This is the 3.9 MB the whole worker is
     // for. One copy of each is kept — see keepOnlyLatest.
     return (event) => cacheFirst(event, DATA, true);
   }

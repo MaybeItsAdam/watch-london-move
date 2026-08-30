@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { SplashScreen } from '@capacitor/splash-screen';
@@ -60,4 +60,42 @@ export function useNativeShell(ready: boolean) {
     }
     SplashScreen.hide().catch(() => {});
   }, [ready]);
+}
+
+/**
+ * Android's hardware/gesture back button.
+ *
+ * A single-page app gets no back behaviour for free: with no listener, back
+ * exits the app outright from wherever you are — including with a vehicle panel
+ * open, which on Android reads as a crash rather than a navigation. Android
+ * users expect back to unwind the visible layers first and only then leave.
+ *
+ * `steps` are tried in order, most-recently-opened first; each returns true if
+ * it had something to close. When none does, the app exits, which is the
+ * correct terminal behaviour rather than trapping the user inside it.
+ *
+ * A ref holds the steps so a changing closure never re-registers the native
+ * listener: `addListener` is asynchronous, and re-running this effect on every
+ * render that changes a handler races its own removal.
+ */
+export function useAndroidBack(steps: (() => boolean)[]) {
+  const stepsRef = useRef(steps);
+  stepsRef.current = steps;
+
+  useEffect(() => {
+    if (!IS_NATIVE) {
+      return;
+    }
+    const listener = CapacitorApp.addListener('backButton', () => {
+      for (const step of stepsRef.current) {
+        if (step()) {
+          return;
+        }
+      }
+      CapacitorApp.exitApp();
+    });
+    return () => {
+      listener.then((handle) => handle.remove());
+    };
+  }, []);
 }

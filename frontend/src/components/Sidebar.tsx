@@ -1,7 +1,8 @@
-import { memo, useMemo } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { FILTER_COLORS, FILTER_LABELS, FILTER_ORDER } from '../config';
 import type { BasemapMode } from '../config';
 import type { FilterKey, LineSummary } from '../types';
+import { VIRTUALIZE_ABOVE_ROWS, rowWindow } from '../window-rows';
 
 const BASEMAP_MODES: { key: BasemapMode; label: string }[] = [
   { key: 'auto', label: 'Auto' },
@@ -20,6 +21,8 @@ type SidebarProps = {
   lines: LineSummary[];
   selectedLines: string[];
   onToggleLine: (id: string) => void;
+  /** Narrow the map to exactly one route — what pressing Enter in search does. */
+  onFocusLine: (id: string) => void;
   onClearLines: () => void;
   showRoutes: boolean;
   onToggleRoutes: () => void;
@@ -47,6 +50,41 @@ function CloseIcon() {
       </g>
     </svg>
   );
+}
+
+/** Fallback until the stylesheet has been read; matches the desktop value. */
+const DEFAULT_ROW_STRIDE = 30;
+
+/**
+ * The row pitch, read from the stylesheet rather than hardcoded.
+ *
+ * `--line-row-stride` differs between pointer types (44px targets on touch),
+ * and a windowed list that disagrees with CSS about row height drifts further
+ * out of place with every row scrolled. Re-read when the pointer type changes,
+ * which is a real event on a convertible laptop.
+ */
+function useRowStride(ref: React.RefObject<HTMLDivElement | null>, active: boolean): number {
+  const [stride, setStride] = useState(DEFAULT_ROW_STRIDE);
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element || !active) {
+      return;
+    }
+    const read = () => {
+      const raw = getComputedStyle(element).getPropertyValue('--line-row-stride');
+      const value = Number.parseFloat(raw);
+      if (Number.isFinite(value) && value > 0) {
+        setStride(value);
+      }
+    };
+    read();
+    const query = matchMedia('(pointer: coarse)');
+    query.addEventListener('change', read);
+    return () => query.removeEventListener('change', read);
+  }, [ref, active]);
+
+  return stride;
 }
 
 function matches(line: LineSummary, needle: string): boolean {
@@ -77,6 +115,7 @@ export const Sidebar = memo(function Sidebar({
   lines,
   selectedLines,
   onToggleLine,
+  onFocusLine,
   onClearLines,
   showRoutes,
   onToggleRoutes,
@@ -91,6 +130,63 @@ export const Sidebar = memo(function Sidebar({
       (line) => filters[line.group] && (needle === '' || matches(line, needle)),
     );
   }, [lines, filters, search]);
+
+  // --- windowing -----------------------------------------------------------
+  //
+  // The list runs to several hundred rows. Memoisation keeps it off the frame
+  // path, but every filter keystroke still built, laid out and painted the lot
+  // — and on a phone the sidebar is a sheet showing perhaps a dozen of them.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const windowed = open && visibleLines.length > VIRTUALIZE_ABOVE_ROWS;
+  const stride = useRowStride(listRef, windowed);
+
+  useLayoutEffect(() => {
+    const element = listRef.current;
+    if (!element || !windowed) {
+      return;
+    }
+    setViewportHeight(element.clientHeight);
+    const observer = new ResizeObserver(() => setViewportHeight(element.clientHeight));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [windowed]);
+
+  // A narrowed search leaves the scroll position pointing past the end of the
+  // new list, which would window in on nothing at all.
+  useEffect(() => {
+    const element = listRef.current;
+    if (element && element.scrollTop !== 0) {
+      element.scrollTop = 0;
+    }
+    setScrollTop(0);
+  }, [search, filters]);
+
+  const onScroll = useCallback(() => {
+    const element = listRef.current;
+    if (element) {
+      setScrollTop(element.scrollTop);
+    }
+  }, []);
+
+  const total = visibleLines.length;
+  const slice = rowWindow(total, scrollTop, windowed ? viewportHeight : 0, stride);
+  const rendered = windowed ? visibleLines.slice(slice.first, slice.last) : visibleLines;
+
+  const renderRow = (line: LineSummary) => (
+    <button
+      key={line.id}
+      className={`line-row${selected.has(line.id) ? ' selected' : ''}`}
+      onClick={() => onToggleLine(line.id)}
+      aria-pressed={selected.has(line.id)}
+    >
+      <span className="line-swatch" style={{ background: line.color }} />
+      <span className="line-label">{line.label}</span>
+      <span className="line-group">{FILTER_LABELS[line.group]}</span>
+      <span className="line-count">{line.count}</span>
+    </button>
+  );
 
   if (!open) {
     return (
@@ -121,13 +217,23 @@ export const Sidebar = memo(function Sidebar({
         </button>
       </div>
 
+      {/* Enter narrows the map to the top match rather than only the list.
+          The placeholder has always promised to "search a line", and filtering
+          a list beside the map while the map itself ignored you was the gap
+          between what it said and what it did. */}
       <input
         className="sidebar-search"
         type="search"
         value={search}
         onChange={(event) => onSearchChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && visibleLines.length > 0) {
+            event.preventDefault();
+            onFocusLine(visibleLines[0].id);
+          }
+        }}
         placeholder="Search a line or bus route"
-        aria-label="Search a line or bus route"
+        aria-label="Search a line or bus route. Press Enter to show the top match on the map."
       />
 
       <div className="mode-chips">
@@ -173,25 +279,28 @@ export const Sidebar = memo(function Sidebar({
         ) : null}
       </div>
 
-      <div className="line-list">
-        {visibleLines.length === 0 ? (
+      <div
+        className="line-list"
+        ref={listRef}
+        onScroll={windowed ? onScroll : undefined}
+      >
+        {total === 0 ? (
           <p className="line-empty">
             {lines.length === 0 ? 'Waiting for vehicle data…' : 'No routes match that search.'}
           </p>
-        ) : (
-          visibleLines.map((line) => (
-            <button
-              key={line.id}
-              className={`line-row${selected.has(line.id) ? ' selected' : ''}`}
-              onClick={() => onToggleLine(line.id)}
-              aria-pressed={selected.has(line.id)}
+        ) : windowed ? (
+          // The sizer holds the full scroll height so the scrollbar tells the
+          // truth; only the visible slice exists, translated into place.
+          <div className="line-list-sizer" style={{ height: slice.height }}>
+            <div
+              className="line-list-window"
+              style={{ transform: `translateY(${slice.offset}px)` }}
             >
-              <span className="line-swatch" style={{ background: line.color }} />
-              <span className="line-label">{line.label}</span>
-              <span className="line-group">{FILTER_LABELS[line.group]}</span>
-              <span className="line-count">{line.count}</span>
-            </button>
-          ))
+              {rendered.map(renderRow)}
+            </div>
+          </div>
+        ) : (
+          rendered.map(renderRow)
         )}
       </div>
     </aside>

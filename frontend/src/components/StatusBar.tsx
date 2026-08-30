@@ -11,6 +11,7 @@ type StatusBarProps = {
 };
 
 const STATUS_LABELS: Record<ConnectionStatus, string> = {
+  connecting: 'Connecting',
   connected: 'Connected',
   reconnecting: 'Reconnecting',
   disconnected: 'Disconnected',
@@ -30,7 +31,13 @@ export const StatusBar = memo(function StatusBar({
     lastPayloadAt == null ? null : Math.max(0, Math.floor((now - lastPayloadAt) / 1000));
 
   return (
-    <div className={`status-bar panel${shifted ? ' shifted' : ''}`}>
+    <div
+      className={`status-bar panel${shifted ? ' shifted' : ''}`}
+      // Announced rather than merely shown: losing the feed is the one thing
+      // here a non-sighted user has no other way to notice.
+      role="status"
+      aria-live="polite"
+    >
       <span className={`status-dot ${status}`} title={STATUS_LABELS[status]} />
       <span className="status-label">{STATUS_LABELS[status]}</span>
       <span className="status-count">{vehicleCount} vehicles</span>

@@ -32,4 +32,12 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- The "centre the map on my location" control. Coarse only: the map is
+         centred at city zoom, so street-level precision buys nothing and asking
+         for it is a larger permission prompt and a larger privacy claim than
+         the feature needs. Both are optional at runtime — the control fails
+         quietly if the user declines. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
 </manifest>

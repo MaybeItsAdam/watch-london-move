@@ -1,4 +1,5 @@
 const dotenv = require('dotenv');
+const fs = require('fs');
 const path = require('path');
 
 dotenv.config();
@@ -69,6 +70,33 @@ if (isProduction && !process.env.METRICS_TOKEN) {
   warnings.push(
     'METRICS_TOKEN is unset, so /health reports liveness only. Set it to read bandwidth, cost and poll metrics in production.',
   );
+}
+
+// Route geometry and the stop index are checkpointed to disk so a restart does
+// not repay the multi-minute TfL rebuild. That only works if the directory is a
+// mounted volume — which Railway can only be told from its dashboard, not from
+// railway.toml (see backend/DEPLOY.md). Nothing else notices when it is
+// missing: the service comes up healthy and simply pays the rebuild again on
+// every single deploy, which is visible only to someone reading boot logs.
+//
+// Warned rather than fatal, and worded for the recurrence: an empty cache is
+// also exactly what a genuinely first deploy looks like.
+const cacheDir = path.dirname(
+  process.env.ROUTE_SEQUENCE_CACHE_PATH ||
+    path.join(__dirname, '..', '.cache', 'route-sequences.json'),
+);
+if (isProduction) {
+  let checkpoints = 0;
+  try {
+    checkpoints = fs.readdirSync(cacheDir).length;
+  } catch {
+    checkpoints = 0;
+  }
+  if (checkpoints === 0) {
+    warnings.push(
+      `No checkpoint found in ${cacheDir}. Expected on a first deploy; if it repeats on every deploy the persistent volume is not mounted and each restart will rebuild route geometry from TfL (minutes, and a large share of the API budget).`,
+    );
+  }
 }
 
 // Clamped rather than trusted: this is a per-vehicle multiplier on the payload,

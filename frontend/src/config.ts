@@ -158,8 +158,22 @@ export function filterKeyForType(type: string): FilterKey | null {
  * which is why it went unnoticed. Rail route groups are already lower case, so
  * this is a no-op for them.
  */
+/**
+ * Memoised because this sits on the per-frame path — the fleet bucketing calls
+ * it once per vehicle per frame whenever a line filter is active, and dimming
+ * calls it again. There are a few hundred distinct route ids in the whole
+ * network, so the table is small and never needs evicting.
+ */
+const lineIdCache = new Map<string, string>();
+
 export function routeLineId(vehicle: { line: string; routeGroup: string }): string {
-  return (vehicle.routeGroup === 'bus' ? vehicle.line : vehicle.routeGroup).toLowerCase();
+  const raw = vehicle.routeGroup === 'bus' ? vehicle.line : vehicle.routeGroup;
+  let id = lineIdCache.get(raw);
+  if (id === undefined) {
+    id = raw.toLowerCase();
+    lineIdCache.set(raw, id);
+  }
+  return id;
 }
 
 export const BUS_RED = '#DC241F';

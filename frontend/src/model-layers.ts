@@ -71,6 +71,8 @@ export type ModelLayerParams = {
   onClick: (info: { object?: VehicleRow }) => void;
   onHover: (info: { object?: VehicleRow }) => void;
   colorTrigger: string;
+  /** Bumped once per animation frame; drives the pose accessors only. */
+  positionEpoch: number;
 };
 
 export function buildModelLayers({
@@ -82,15 +84,24 @@ export function buildModelLayers({
   onClick,
   onHover,
   colorTrigger,
+  positionEpoch,
 }: ModelLayerParams): Layer[] {
   // `scenegraph` is one model per layer, not a per-row accessor — passing a
   // function leaves the layer with no model at all, so each shape gets its
   // own layer.
-  return MODELS.filter((model) => fleet[model.bucket].length > 0).map(
-    (model) =>
+  //
+  // A plain loop rather than `.filter().map()`: this runs every frame, and the
+  // intermediate array it used to build was pure garbage.
+  const layers: Layer[] = [];
+  for (const model of MODELS) {
+    const data = fleet[model.bucket];
+    if (data.length === 0) {
+      continue;
+    }
+    layers.push(
       new ScenegraphLayer<VehicleRow>({
         id: `vehicles-${model.key}`,
-        data: fleet[model.bucket],
+        data,
         scenegraph: models[model.key],
         opacity,
         sizeScale: sizeScale(model, zoom),
@@ -106,9 +117,18 @@ export function buildModelLayers({
         pickable: true,
         onClick,
         onHover,
-        updateTriggers: { getColor: colorTrigger },
+        // Pose every frame, tint only when the selection or focus moves. See
+        // `reconcile` in ./layers for why a stable `data` array is what makes
+        // that distinction real rather than decorative.
+        updateTriggers: {
+          getPosition: positionEpoch,
+          getOrientation: positionEpoch,
+          getColor: colorTrigger,
+        },
       }),
-  );
+    );
+  }
+  return layers;
 }
 
 /**

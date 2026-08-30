@@ -1,7 +1,15 @@
 import type { FeatureCollection } from 'geojson';
 import { BACKEND_URL } from './config';
 import manifest from './static-data-manifest.json';
+import {
+  decodeStopIndex,
+  queryStopIndex,
+  type StopIndex,
+  type StopRecord,
+} from './stop-index';
 import type { Bounds } from './types';
+
+export type { StopRecord } from './stop-index';
 
 /**
  * Route geometry and stop markers, resolved from the build instead of the wire.
@@ -196,44 +204,33 @@ export function startRouteGeometry(onCollection: (collection: FeatureCollection)
 // Stops
 // ---------------------------------------------------------------------------
 
-export type StopRecord = {
-  id: string;
-  lat: number;
-  lon: number;
-  name: string;
-};
-
 /**
- * ~1.1km of latitude. The stops layer only draws above zoom 15, where a viewport
- * spans a couple of hundredths of a degree, so a query touches a handful of
- * cells holding ~25 stops each — against 33,082 for the linear scan this
- * replaces, which ran on every camera settle.
+ * The bundled stop index, fetched once as an `ArrayBuffer`.
+ *
+ * This used to be `stops.json`: 2.57MB parsed on the main thread into 33,082
+ * objects and then re-bucketed into a spatial grid, ~10ms on a laptop and well
+ * over 100ms on a phone — landing during the first zoom to street level, which
+ * is precisely when the user is panning. The grid is now built at build time
+ * and the whole thing arrives as a buffer, so loading it is a header read and a
+ * handful of typed-array views.
+ *
+ * ```
+ * JSON parse + 33k objects + grid    10.58 ms
+ * binary header + typed-array views   0.15 ms      — 71x (bench-stops.mjs)
+ * ```
+ *
+ * See `./stop-index` for the format, and `scripts/build-stop-index.mjs` for the
+ * transform that produces it.
  */
-const STOP_CELL_DEG = 0.01;
-
-type StopIndex = {
-  buckets: Map<string, StopRecord[]>;
-  all: StopRecord[];
-};
-
 let stopIndex: StopIndex | null = null;
 let stopIndexLoad: Promise<StopIndex | null> | null = null;
 
-const cellKey = (lat: number, lon: number) =>
-  `${Math.floor(lat / STOP_CELL_DEG)}:${Math.floor(lon / STOP_CELL_DEG)}`;
-
-function buildStopIndex(stops: StopRecord[]): StopIndex {
-  const buckets = new Map<string, StopRecord[]>();
-  for (const stop of stops) {
-    const key = cellKey(stop.lat, stop.lon);
-    const bucket = buckets.get(key);
-    if (bucket) {
-      bucket.push(stop);
-    } else {
-      buckets.set(key, [stop]);
-    }
+async function fetchStopIndex(url: string): Promise<StopIndex> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
   }
-  return { buckets, all: stops };
+  return decodeStopIndex(await response.arrayBuffer());
 }
 
 function ensureStopIndex(): Promise<StopIndex | null> {
@@ -244,55 +241,21 @@ function ensureStopIndex(): Promise<StopIndex | null> {
     return Promise.resolve(null);
   }
   if (!stopIndexLoad) {
-    stopIndexLoad = fetchJson<{ stops: StopRecord[] }>(dataUrl(manifest.stops.path))
-      .then((payload) => {
-        stopIndex = buildStopIndex(payload.stops ?? []);
+    stopIndexLoad = fetchStopIndex(dataUrl(manifest.stops.path))
+      .then((index) => {
+        stopIndex = index;
         return stopIndex;
       })
       .catch(() => {
         // Cleared so a transient failure does not condemn the session to the
-        // per-pan HTTP path forever; the next camera settle tries again.
+        // per-pan HTTP path forever; the next camera settle tries again. A
+        // malformed buffer takes the same route as a failed fetch — the backend
+        // can still answer, and a broken bundled index must not mean no stops.
         stopIndexLoad = null;
         return null;
       });
   }
   return stopIndexLoad;
-}
-
-function queryStopIndex(index: StopIndex, bounds: Bounds): StopRecord[] {
-  const minY = Math.floor(bounds.south / STOP_CELL_DEG);
-  const maxY = Math.floor(bounds.north / STOP_CELL_DEG);
-  const minX = Math.floor(bounds.west / STOP_CELL_DEG);
-  const maxX = Math.floor(bounds.east / STOP_CELL_DEG);
-  const cells = (maxY - minY + 1) * (maxX - minX + 1);
-
-  const within = (stop: StopRecord) =>
-    stop.lat >= bounds.south &&
-    stop.lat <= bounds.north &&
-    stop.lon >= bounds.west &&
-    stop.lon <= bounds.east;
-
-  // A box wider than the network is cheaper to answer by scanning every stop
-  // than by walking its cells: a whole-world bounds would be 600M empty lookups.
-  if (cells > index.buckets.size) {
-    return index.all.filter(within);
-  }
-
-  const found: StopRecord[] = [];
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = minX; x <= maxX; x += 1) {
-      const bucket = index.buckets.get(`${y}:${x}`);
-      if (!bucket) {
-        continue;
-      }
-      for (const stop of bucket) {
-        if (within(stop)) {
-          found.push(stop);
-        }
-      }
-    }
-  }
-  return found;
 }
 
 /**

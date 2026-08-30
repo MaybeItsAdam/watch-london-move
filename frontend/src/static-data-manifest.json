@@ -6,8 +6,9 @@
     "lines": 662
   },
   "stops": {
-    "path": "data/stops.json",
-    "bytes": 2574658,
-    "count": 33082
+    "path": "data/stops.bin",
+    "bytes": 1482190,
+    "count": 33082,
+    "format": "binary"
   }
 }

@@ -38,13 +38,31 @@ class StateStore {
       }
       this.tileMembers(tile).add(vehicle.id);
 
-      this.current.set(vehicle.id, {
-        ...existing,
-        ...vehicle,
-        tile,
-        updated_at: now,
-        last_seen_at: nowMs,
-      });
+      // The schedule key is derived here, once per vehicle per poll, rather
+      // than in getDelta — which ran it for the entire fleet on every emit
+      // tick, allocating an array and a string per vehicle purely to decide
+      // that nothing had changed. Polls are several times rarer than emits and
+      // this is the only place the schedule can actually change.
+      const scheduleKey = StateStore.scheduleKey(vehicle);
+
+      if (existing) {
+        // Merged into the object already in the map rather than spread into a
+        // third one: the spread allocated a fresh object per vehicle per poll
+        // even when every field was identical to last time. `existing` is
+        // private to this store, and assigning `vehicle` over it keeps exactly
+        // the same precedence the spread had.
+        Object.assign(existing, vehicle);
+        existing.tile = tile;
+        existing.updated_at = now;
+        existing.last_seen_at = nowMs;
+        existing.schedule_key = scheduleKey;
+      } else {
+        vehicle.tile = tile;
+        vehicle.updated_at = now;
+        vehicle.last_seen_at = nowMs;
+        vehicle.schedule_key = scheduleKey;
+        this.current.set(vehicle.id, vehicle);
+      }
     });
 
     this.lastUpdatedAt = now;
@@ -208,7 +226,8 @@ class StateStore {
 
     for (const [id, vehicle] of this.current.entries()) {
       const previous = this.previous.get(id);
-      const scheduleKey = StateStore.scheduleKey(vehicle);
+      // Computed at upsert time; see upsertVehicles.
+      const scheduleKey = vehicle.schedule_key ?? '';
       if (
         previous &&
         previous.lat === vehicle.lat &&

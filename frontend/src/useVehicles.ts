@@ -26,6 +26,11 @@ import type {
   VehicleRow,
 } from './types';
 
+/** Points kept in the tracked vehicle's breadcrumb trail. */
+const TRAIL_POINTS = 25;
+/** Shared empty result, so `getHistory` never allocates for the common miss. */
+const NO_TRAIL: [number, number][] = [];
+
 const MIN_GLIDE_MS = 2000;
 // Predictions are now absolute deadlines rather than countdowns that rot in
 // transit, so this ceiling has to be generous enough to hold a real one: a
@@ -291,11 +296,33 @@ function detachedRow(vehicle: RenderVehicle, now: number): VehicleRow {
   return { ...vehicle, position: [...vehicle.position] as [number, number, number] };
 }
 
+/**
+ * Called once per paced animation frame with every vehicle's pose for that
+ * frame. `rows` is reused between frames and is only valid for the duration of
+ * the call — the same contract `RenderVehicle` already carries.
+ */
+export type FrameHandler = (rows: VehicleRow[], positionEpoch: number) => void;
+
 export type VehiclesApi = {
   /** Current interpolated pose of one vehicle, or null if unknown. */
   getDisplayed: (id: string) => VehicleRow | null;
-  /** Breadcrumb trail of the last raw positions received for a vehicle. */
+  /**
+   * Breadcrumb trail of the raw positions received for the *tracked* vehicle —
+   * see `trackTrail`. Any other id answers empty.
+   */
   getHistory: (id: string) => [number, number][];
+  /**
+   * Choose the one vehicle whose trail is recorded, or `null` for none.
+   *
+   * The trail used to be kept for the entire fleet: an array per vehicle plus a
+   * `[lon, lat]` and a 25-element `slice` copy per vehicle per payload, ~160,000
+   * live arrays to serve a panel that only ever asks about one of them. It is a
+   * fallback for the minority of lines that have no route geometry, so it is now
+   * recorded on demand. The cost is that a freshly tracked vehicle starts with
+   * only the point it is standing on and draws its trail from there, rather than
+   * showing 25 points of history it happened to have banked.
+   */
+  trackTrail: (id: string | null) => void;
   /**
    * Destination and next stop for specific vehicles. Not broadcast — only the
    * selected vehicle's panel shows them, and carrying them for the whole fleet
@@ -314,7 +341,9 @@ export type VehiclesApi = {
  */
 export function useVehicles(onVehicleRemoved?: (id: string) => void) {
   const vehiclesRef = useRef<Map<string, RenderVehicle>>(new Map());
-  const historyRef = useRef<Map<string, [number, number][]>>(new Map());
+  /** The one vehicle whose breadcrumb trail is being recorded; see `trackTrail`. */
+  const trailIdRef = useRef<string | null>(null);
+  const trailRef = useRef<[number, number][]>([]);
   const socketRef = useRef<Socket | null>(null);
   // Replayed on reconnect: a new socket starts out subscribed to everything.
   const viewportRef = useRef<Bounds | null>(null);
@@ -327,8 +356,12 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
   // them once the transit time has been filtered out. See applyPayload.
   const clockOffsetRef = useRef(Number.POSITIVE_INFINITY);
 
-  const [tick, setTick] = useState(0);
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
+  // The rAF loop drives the map directly rather than through a React render —
+  // see `subscribeFrames`. These are the only things it touches per frame.
+  const frameHandlerRef = useRef<FrameHandler | null>(null);
+  const rowsRef = useRef<VehicleRow[]>([]);
+  const epochRef = useRef(0);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
   const [lastPayloadAt, setLastPayloadAt] = useState<number | null>(null);
   const active = useAppActive();
 
@@ -339,7 +372,10 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
 
     const removeVehicle = (id: string) => {
       if (vehiclesRef.current.delete(id)) {
-        historyRef.current.delete(id);
+        if (trailIdRef.current === id) {
+          trailIdRef.current = null;
+          trailRef.current = [];
+        }
         removedCallbackRef.current?.(id);
       }
     };
@@ -560,9 +596,14 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
           overdueMs: 0,
         });
 
-        const history = historyRef.current.get(id) || [];
-        history.push([lon, lat]);
-        historyRef.current.set(id, history.slice(-25));
+        if (id === trailIdRef.current) {
+          const trail = trailRef.current;
+          trail.push([lon, lat]);
+          // In place: `slice(-25)` copied the whole window on every append.
+          if (trail.length > TRAIL_POINTS) {
+            trail.splice(0, trail.length - TRAIL_POINTS);
+          }
+        }
       }
 
       // A full snapshot reconciles: anything we know about that the backend no
@@ -616,6 +657,8 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
       setConnectionStatus('disconnected');
     });
     socket.on('connect_error', () => {
+      // Only a session that has never connected can still be `connecting`, and
+      // a failed first attempt is the point at which that stops being true.
       setConnectionStatus(everConnected ? 'reconnecting' : 'disconnected');
     });
     socket.io.on('reconnect_attempt', () => {
@@ -724,7 +767,23 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
         return;
       }
       lastTickAt = now;
-      setTick((value) => value + 1);
+
+      const handler = frameHandlerRef.current;
+      if (!handler) {
+        return;
+      }
+      // Reused across frames: `bucketFleet` reconciles this into the per-bucket
+      // arrays deck.gl actually holds, so nothing downstream depends on this
+      // array's identity. It used to be rebuilt every frame purely to satisfy
+      // deck's reference check, which `bucketFleet` now answers properly.
+      const list = rowsRef.current;
+      list.length = 0;
+      const at = Date.now();
+      for (const vehicle of vehiclesRef.current.values()) {
+        list.push(updateRow(vehicle, at));
+      }
+      epochRef.current += 1;
+      handler(list, epochRef.current);
     };
 
     frame = window.requestAnimationFrame(animate);
@@ -736,20 +795,6 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
     socketRef.current?.emit('viewport:set', bounds);
   }, []);
 
-  const rows = useMemo<VehicleRow[]>(() => {
-    void tick; // rAF-driven: recompute the interpolated pose each frame.
-    const now = Date.now();
-    // A fresh array, but the same vehicle objects: deck.gl decides an attribute
-    // needs re-uploading by comparing the `data` reference, so reusing one array
-    // across frames would freeze the fleet on screen. The array is one
-    // allocation; the 6,500 objects in it are not re-allocated.
-    const list: VehicleRow[] = [];
-    for (const vehicle of vehiclesRef.current.values()) {
-      list.push(updateRow(vehicle, now));
-    }
-    return list;
-  }, [tick]);
-
   const api = useMemo<VehiclesApi>(
     () => ({
       getDisplayed(id: string) {
@@ -757,7 +802,17 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
         return vehicle ? detachedRow(vehicle, Date.now()) : null;
       },
       getHistory(id: string) {
-        return historyRef.current.get(id) ?? [];
+        return id === trailIdRef.current ? trailRef.current : NO_TRAIL;
+      },
+      trackTrail(id: string | null) {
+        if (trailIdRef.current === id) {
+          return;
+        }
+        trailIdRef.current = id;
+        // Seeded with where the vehicle is now, so the trail has an anchor to
+        // grow from rather than appearing only on the second payload.
+        const vehicle = id ? vehiclesRef.current.get(id) : null;
+        trailRef.current = vehicle ? [[vehicle.to[0], vehicle.to[1]]] : [];
       },
       fetchDetails(ids: string[]) {
         const socket = socketRef.current;
@@ -780,5 +835,24 @@ export function useVehicles(onVehicleRemoved?: (id: string) => void) {
     [],
   );
 
-  return { rows, connectionStatus, lastPayloadAt, api, setViewport };
+  /**
+   * Register the per-frame handler. Returns an unsubscribe.
+   *
+   * This is what keeps the animation loop out of React. The loop used to call
+   * `setTick`, which re-rendered `App` sixty times a second for the sole purpose
+   * of reaching an effect that called `overlay.setProps` — a full reconciliation,
+   * effect schedule and dependency-array diff per frame, to hand deck.gl an
+   * array. The handler is called with the fleet's poses for this frame and a
+   * monotonic epoch for deck's position `updateTriggers`.
+   */
+  const subscribeFrames = useCallback((handler: FrameHandler) => {
+    frameHandlerRef.current = handler;
+    return () => {
+      if (frameHandlerRef.current === handler) {
+        frameHandlerRef.current = null;
+      }
+    };
+  }, []);
+
+  return { subscribeFrames, connectionStatus, lastPayloadAt, api, setViewport };
 }

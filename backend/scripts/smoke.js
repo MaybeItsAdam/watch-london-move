@@ -116,8 +116,20 @@ async function checkHealth() {
   ['prunedLastPoll', 'prunedTotal', 'storeSize', 'emitTick', 'lastDeltaSize'].forEach((key) => {
     assert(key in body.metrics, `/health metrics missing key: ${key}`);
   });
-  ['lastTickFanoutBytes', 'totalFanoutBytes', 'bytesPerClientPerHourUncompressed', 'compression', 'httpCompression'].forEach((key) => {
+  [
+    'estimatedLastTickFanoutBytes',
+    'estimatedTotalFanoutBytes',
+    'estimatedBytesPerClientPerHourUncompressed',
+    'compression',
+    'httpCompression',
+  ].forEach((key) => {
     assert(key in body.bandwidth, `/health bandwidth missing key: ${key}`);
+  });
+  // Added with the event-loop and memory instrumentation: this service's one
+  // real outage mode is a blocked loop, and nothing used to report it.
+  assert(typeof body.feedStale === 'boolean', `/health feedStale is ${body.feedStale}`);
+  ['eventLoopDelay', 'memory'].forEach((key) => {
+    assert(key in body.process, `/health process missing key: ${key}`);
   });
   ['sizeDeg', 'occupied'].forEach((key) => {
     assert(key in body.tiles, `/health tiles missing key: ${key}`);

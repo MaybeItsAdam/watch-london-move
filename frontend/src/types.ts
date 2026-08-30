@@ -194,7 +194,13 @@ export type LineSummary = {
   count: number;
 };
 
-export type ConnectionStatus = 'connected' | 'reconnecting' | 'disconnected';
+/**
+ * `connecting` is the opening state of every session and is distinct from
+ * `disconnected` on purpose: the status bar used to open on a red dot reading
+ * "Disconnected" for as long as the socket handshake took, which is a fault
+ * light for the one moment nothing is wrong yet.
+ */
+export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
 /** One entry per generated model. `train` is deep-tube stock and the default
  *  for any rail type without a shape of its own. */
