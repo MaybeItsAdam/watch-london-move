@@ -76,8 +76,10 @@ jobs:
         run: npm ci && npm run lint && npm test
         working-directory: backend
 
-      - name: Frontend lint + build
-        run: npm ci && npm run lint && npm run build
+      # Mirrors ci.yml's frontend job. `npm run build` is `tsc -b && vite build`,
+      # so this typechecks too; `budget` needs the build to have happened.
+      - name: Frontend lint, tests + build
+        run: npm ci && npm run lint && npm test && npm run build && npm run budget
         working-directory: frontend
 
   # ─── iOS: build IPA → upload to TestFlight (via Fastlane) ───

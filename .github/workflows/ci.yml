@@ -32,6 +32,38 @@ jobs:
       - run: npm run lint
       - run: npm test
 
+      # The unit suite covers the pure modules; server.js has no exports and so
+      # no unit tests at all. This is the only thing that exercises the socket
+      # wiring, the HTTP routes, the rate limiter's Retry-After and the /health
+      # auth gate together, and it had been sitting in scripts/ uninvoked.
+      #
+      # No TFL_APP_KEY, so the poller finds nothing and route geometry never
+      # finishes building. That is a supported shape for this script: it accepts
+      # 503 "still loading" from /routes and an empty fleet from /snapshot, and
+      # every structural assertion still runs. The generous rate limits keep the
+      # run from spending minutes waiting out its own token bucket — the limiter
+      # itself is unit-tested in rate-limit.test.js.
+      - name: Server smoke test
+        env:
+          PORT: '4010'
+          METRICS_TOKEN: ci-smoke-token
+          CORS_ORIGIN: http://localhost:5173
+          RATE_HTTP_CAPACITY: '10000'
+          RATE_HTTP_REFILL: '1000'
+        run: |
+          npm start &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -sf --max-time 2 "http://localhost:$PORT/health" >/dev/null && break
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "::error::backend exited during start-up"
+              exit 1
+            fi
+            sleep 1
+          done
+          BACKEND_URL="http://localhost:$PORT" npm run smoke:server
+
   frontend:
     name: Frontend lint & build
     runs-on: ubuntu-latest
@@ -47,5 +79,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run lint
+      - run: npm test
       # `npm run build` is `tsc -b && vite build`, so this typechecks too.
       - run: npm run build
+      # Nothing else in this workflow notices a chunk gaining 300KB. Budgets and
+      # the reasoning behind them live in scripts/check-budget.mjs.
+      - run: npm run budget
