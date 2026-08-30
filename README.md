@@ -114,11 +114,24 @@ dominant line, so both now ship inside the build instead:
 cd frontend && npm run static-data   # against a running backend
 ```
 
-That writes `public/data/routes.json`, `public/data/stops.json` and
-`src/static-data-manifest.json`, quantising every coordinate to 5 dp
-(~1.1 m, the same precision the backend's wire encoder already uses).
-All three are **committed**, so CI and a fresh clone build without a
-live backend. Regenerate them when TfL's geometry moves.
+That writes `public/data/routes.json`, `data-src/stops.json`,
+`public/data/stops.bin` and `src/static-data-manifest.json`, quantising
+every coordinate to 5 dp (~1.1 m, the same precision the backend's wire
+encoder already uses). All four are **committed**, so CI and a fresh
+clone build without a live backend. Regenerate them when TfL's geometry
+moves.
+
+The stops are shipped as a binary index rather than JSON — two
+`Float32Array`s and a grid built at *build* time, against 2.57 MB parsed
+into 33,082 objects and re-bucketed on load, which was ~100 ms of
+blocking on a phone during the first zoom to street level. `stops.json`
+is the source and deliberately sits outside `public/` so only the binary
+ships; see [`stop-index.ts`](frontend/src/stop-index.ts). Rebuilding it
+alone needs no backend:
+
+```sh
+cd frontend && npm run stop-index
+```
 
 At runtime [`frontend/src/static-data.ts`](frontend/src/static-data.ts)
 resolves the bundled copy first — off the static host on web, out of the

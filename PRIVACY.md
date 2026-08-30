@@ -19,10 +19,19 @@ We do not collect, store or transmit personal data about you.
 
 * **No account, no sign-in, no identifier.** The App never asks who you are and
   never assigns you a user id, advertising id, or any other persistent token.
-* **No device location.** The App does not use the geolocation API and does not
-  request location permission on either platform. It shows you where *vehicles*
-  are, never where you are. The Android build requests one permission,
-  `INTERNET`; the iOS build requests none.
+* **No location history, and no location without you asking.** The App has one
+  optional "centre the map on my location" control. Tapping it asks your device
+  for an approximate position once; the position is used immediately to move the
+  map and is never stored, logged, or sent to our server or anyone else. If you
+  decline the permission the control simply does nothing and the rest of the App
+  is unaffected. Nothing else in the App reads your location, and there is no
+  background or continuous location tracking of any kind. The Android build
+  requests `INTERNET` and `ACCESS_COARSE_LOCATION` (approximate, not precise);
+  the iOS build declares `NSLocationWhenInUseUsageDescription` for the same
+  control. Because your position never leaves the device, it is not "collected"
+  in the sense either app store uses, which is why the App's store privacy
+  labels declare no data collection. The map otherwise shows you where
+  *vehicles* are, not where you are.
 * **No analytics, tracking or advertising.** There is no analytics SDK, no
   tracking pixel, no advertising network, and nothing is shared with data
   brokers. The iOS privacy manifest (`PrivacyInfo.xcprivacy`) declares tracking
@@ -43,6 +52,16 @@ Everything the App stores is local, and none of it describes you.
 * **One session flag.** If you disable the service worker using `?sw=off`, the
   App records that choice in `sessionStorage` under the key `wlm-sw-off` so it is
   not immediately re-enabled. It is discarded when you close the tab.
+* **Your display preferences.** Whether the sidebar is open, whether route lines
+  are shown, and whether you have dismissed the legend are kept in
+  `localStorage` under `wlm.prefs.v1`. Three settings describing the App's
+  appearance; nothing about you.
+* **The address bar.** Where the map is pointing, which lines you have filtered
+  to and which vehicle you have selected are written into the page URL so that
+  reloading returns you to the same view and you can share a link to it. This is
+  visible to you, travels only if you choose to share it, and contains nothing
+  but map coordinates and route identifiers. It is never your location — the
+  camera is wherever you have panned to.
 
 You can remove all of it by clearing the site's storage in your browser, or by
 uninstalling the app.

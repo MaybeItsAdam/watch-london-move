@@ -107,10 +107,14 @@ These are already handled; they are listed because they are easy to undo.
   stops the animation frame loop and closes the socket — iOS kills a suspended
   socket silently, so without this a resumed app shows `connected` while
   receiving nothing. Resume reconnects and asks for a full resync.
-- **Frame rate.** `TARGET_FPS` is 30 on coarse pointers, 60 otherwise. Every
-  tick re-derives the whole fleet's pose and rebuilds the deck.gl layers, so
-  this is the app's main power draw. Interpolation is time-based, so the lower
-  rate costs smoothness only.
+- **Frame rate.** `TARGET_FPS` is a ceiling, not a setting: the rAF loop in
+  `useVehicles` is closed-loop on the frame intervals the browser actually
+  delivers and steps itself down to a floor of 15fps on a device that cannot
+  hold the rate. Every tick re-derives the whole fleet's pose, so this is the
+  app's main power draw. Interpolation is time-based, so a lower rate costs
+  smoothness only. The loop drives deck.gl directly rather than through a React
+  render, and the layers it hands over reuse their `data` arrays so only the
+  pose attributes are rebuilt — see PERFORMANCE.md §6 and §7.
 - **Touch.** Hit targets are raised to 44px under `@media (pointer: coarse)`,
   which leaves the desktop layout untouched. deck.gl gets `pickingRadius: 8` so
   a fingertip can hit a moving vehicle. Panel `backdrop-filter` is dropped on
@@ -118,13 +122,33 @@ These are already handled; they are listed because they are easy to undo.
 - **Initial camera.** Zoom 12 on narrow screens rather than 10, and the sidebar
   starts collapsed; at zoom 10 a pitched phone viewport opens on the Home
   Counties with London near the horizon.
+- **Geolocation goes through `@capacitor/geolocation`, not `navigator`.** The
+  browser API is unavailable on both native platforms: WKWebView does not
+  implement it for third-party apps and Capacitor's bridge does not proxy it, so
+  on iOS a direct call never calls back at all; and Capacitor's Android
+  `BridgeWebChromeClient` asks for coarse *and* fine location for a WebView
+  prompt, only accepting coarse alone on SDK 31+, so with this app's coarse-only
+  manifest it resolves to denied on our SDK 24–30 floor. The plugin's web
+  implementation wraps `navigator.geolocation`, so the browser keeps its old
+  behaviour and there is one code path. See `src/geolocate.ts`.
+- **Android back button.** `useAndroidBack` (`src/lifecycle.ts`) unwinds what is
+  on screen — the legend, then the selected vehicle, then the sidebar over a
+  phone-sized map — and only calls `exitApp` once there is nothing left to
+  close. With no listener at all, a single-page app exits outright from
+  wherever you are, which with a vehicle panel open reads as a crash rather
+  than a navigation. The steps are held in a ref so a changing closure never
+  re-registers the native listener: `addListener` is asynchronous, and
+  re-running that effect races its own removal.
+- **iOS input zoom.** `.sidebar-search` is 16px under `@media (pointer: coarse)`
+  and 13px otherwise. Below 16px, focusing a field makes iOS zoom the whole
+  viewport and never zoom back out — and this is the app's only text input.
 - **No unicode glyph icons.** `☰` and `✕` are not in the iOS system font and
   render as tofu boxes; `Sidebar.tsx` draws them as inline SVG.
 - **Relative asset URLs.** `vite.config.ts` sets `base: './'` and model loading
   uses `import.meta.env.BASE_URL`, because the WebView origin is not a web root.
 - **No service worker.** The web build registers `public/sw.js` to cache the app
-  shell, the bundled `data/*.json`, and the backend's `/stops` and `/routes`
-  responses — the ~5.2 MB a cold start would otherwise re-download. Service
+  shell, the bundled `data/routes.json` and `data/stops.bin`, and the backend's `/stops` and `/routes`
+  responses — the ~3.9 MB a cold start would otherwise re-download. Service
   workers do not run in the Capacitor WebView, so `src/sw-register.ts` returns
   early on `Capacitor.isNativePlatform()` *before* it touches
   `navigator.serviceWorker`. Not a defensive `catch`: on Android the origin is
@@ -146,8 +170,8 @@ for the pipeline and the remaining one-time store onboarding steps.
   style load now raises a "Basemap unavailable" notice and the vehicle layers
   keep running, so the failure is visible rather than a blank screen — but the
   dependency itself is still worth reconsidering before a store release.
-- The JS is ~2.2 MB across three chunks: `maplibre` (1.0 MB), the app and
-  eager deck.gl (0.9 MB), and `model-layers` (0.25 MB, fetched only when the
+- The JS is ~2.2 MB across four chunks: `maplibre` (1.0 MB), `deckgl` (0.64 MB),
+  the app itself (0.29 MB), and `model-layers` (0.25 MB, fetched only when the
   camera first reaches the zoom that draws 3D models). MapLibre is the bulk of
   a cold start in a WebView and cannot be deferred — the map is the app — so
   further work here means a lighter renderer, not more splitting.
