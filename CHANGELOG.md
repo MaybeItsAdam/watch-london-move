@@ -1,3 +1,10 @@
+# [0.6.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.5.3...v0.6.0) (2026-08-30)
+
+
+### Features
+
+* shareable URL state, a binary stop index, and a much cheaper frame ([8b37885](https://github.com/MaybeItsSoftware/watch-london-move/commit/8b37885529526a195facc27fb8857a7205d7cb30))
+
 ## [0.5.3](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.5.2...v0.5.3) (2026-08-21)
 
 
