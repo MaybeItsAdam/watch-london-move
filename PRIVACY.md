@@ -1,11 +1,11 @@
 # Privacy Policy
 
-**Last updated:** 20 August 2026
+**Last updated:** 3 September 2026
 
 This policy explains what happens to your information when you use **Watch London
 Move** — the website at `watchlondonmove.maybeitssoftware.co.uk` and the iOS and
 Android apps of the same name (together, the "App"), published by
-**MaybeItsSoftware**.
+**MaybeItsSoftware Ltd**.
 
 The App shows London's buses, trains and trams moving in real time. It has no
 accounts, no sign-in, and nothing to personalise, so there is very little to say
@@ -167,7 +167,10 @@ be inspected in full.
 
 ## 9. Contact
 
-Questions about this policy: **<!-- TODO: contact address -->**
+MaybeItsSoftware Ltd, a company registered in the United Kingdom, is the data
+controller for the limited processing described in section 3.
+
+Questions about this policy: **<privacy@maybeitssoftware.co.uk>**
 
 Watch London Move is open source. Its complete source, including everything
 described here, is at <https://github.com/MaybeItsSoftware/watch-london-move>.
