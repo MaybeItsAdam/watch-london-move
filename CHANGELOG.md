@@ -1,3 +1,10 @@
+# [0.7.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.6.0...v0.7.0) (2026-09-07)
+
+
+### Features
+
+* interactive stops, arrivals, station search, route favorites, and disruption status ([1f898ca](https://github.com/MaybeItsSoftware/watch-london-move/commit/1f898cac18f59ca5ede0b8c461f4995bab9cc57f))
+
 # [0.6.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.5.3...v0.6.0) (2026-08-30)
 
 
