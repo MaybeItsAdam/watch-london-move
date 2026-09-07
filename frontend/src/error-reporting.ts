@@ -189,4 +189,16 @@ export function installGlobalErrorHandlers(): void {
   window.addEventListener('unhandledrejection', (event) => {
     reportError(event.reason, { source: 'unhandledrejection' });
   });
+
+  window.addEventListener('vite:preloadError', () => {
+    // A dynamically imported chunk failed to load (e.g. following a new deploy
+    // that pruned old content-hashed filenames). Reload to fetch the new shell.
+    const key = 'wlm-last-preload-reload';
+    const lastReload = Number(sessionStorage.getItem(key) || '0');
+    const now = Date.now();
+    if (now - lastReload > 10_000) {
+      sessionStorage.setItem(key, String(now));
+      window.location.reload();
+    }
+  });
 }

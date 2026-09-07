@@ -18,6 +18,7 @@ export type Prefs = {
   sidebarOpen: boolean | null;
   showRoutes: boolean;
   legendDismissed: boolean;
+  favoriteLines: string[];
 };
 
 export const DEFAULT_PREFS: Prefs = {
@@ -26,6 +27,7 @@ export const DEFAULT_PREFS: Prefs = {
   sidebarOpen: null,
   showRoutes: true,
   legendDismissed: false,
+  favoriteLines: [],
 };
 
 const asBoolean = (value: unknown, fallback: boolean): boolean =>
@@ -47,6 +49,9 @@ export function loadPrefs(): Prefs {
         typeof record.sidebarOpen === 'boolean' ? record.sidebarOpen : DEFAULT_PREFS.sidebarOpen,
       showRoutes: asBoolean(record.showRoutes, DEFAULT_PREFS.showRoutes),
       legendDismissed: asBoolean(record.legendDismissed, DEFAULT_PREFS.legendDismissed),
+      favoriteLines: Array.isArray(record.favoriteLines)
+        ? record.favoriteLines.filter((x): x is string => typeof x === 'string')
+        : DEFAULT_PREFS.favoriteLines,
     };
   } catch {
     return DEFAULT_PREFS;

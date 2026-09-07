@@ -21,13 +21,19 @@ export function useAppActive(): boolean {
     const onVisibility = () => setActive(document.visibilityState !== 'hidden');
     document.addEventListener('visibilitychange', onVisibility);
 
+    if (!IS_NATIVE) {
+      return () => {
+        document.removeEventListener('visibilitychange', onVisibility);
+      };
+    }
+
     const listener = CapacitorApp.addListener('appStateChange', ({ isActive }) => {
       setActive(isActive);
-    });
+    }).catch(() => null);
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
-      listener.then((handle) => handle.remove());
+      listener.then((handle) => handle?.remove()).catch(() => {});
     };
   }, []);
 

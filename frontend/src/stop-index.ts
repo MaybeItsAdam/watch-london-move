@@ -225,3 +225,50 @@ export function queryStopIndex(index: StopIndex, bounds: Bounds): StopRecord[] {
   }
   return found;
 }
+
+let cachedIndexForNames: StopIndex | null = null;
+let cachedNames: string[] | null = null;
+
+function getCachedNames(index: StopIndex): string[] {
+  if (cachedIndexForNames === index && cachedNames) {
+    return cachedNames;
+  }
+  const names = new Array<string>(index.count);
+  for (let i = 0; i < index.count; i += 1) {
+    names[i] = readString(index.nameBlob, index.nameOffset, i);
+  }
+  cachedIndexForNames = index;
+  cachedNames = names;
+  return names;
+}
+
+/**
+ * Search stops by name.
+ * Returns up to `limit` unique stop records matching the query string.
+ */
+export function searchStopIndex(index: StopIndex, query: string, limit = 8): StopRecord[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle || needle.length < 2) {
+    return [];
+  }
+
+  const names = getCachedNames(index);
+  const found: StopRecord[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < index.count; i += 1) {
+    const name = names[i];
+    if (name.toLowerCase().includes(needle)) {
+      const key = name.toLowerCase().replace(/\s+(stop\s+[a-z0-9]+|\bstand\b)/i, '').trim();
+      if (!seen.has(key)) {
+        seen.add(key);
+        found.push(stopAt(index, i));
+        if (found.length >= limit) {
+          break;
+        }
+      }
+    }
+  }
+
+  return found;
+}

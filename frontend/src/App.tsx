@@ -32,8 +32,10 @@ import { currentPosition } from './geolocate';
 import { LOD_MIN_ZOOM, bucketFleet, buildVehicleLayers, vehicleLighting } from './layers';
 import type { FleetBuckets, ModelLayerBuilder } from './layers';
 import { useAndroidBack, useAppActive, useNativeShell } from './lifecycle';
+import { fetchLineStatuses, type LineStatusInfo } from './line-status';
 import { setRouteCollection } from './route-paths';
-import { loadStops, startRouteGeometry } from './static-data';
+import { loadStops, searchStops, startRouteGeometry } from './static-data';
+import type { StopRecord } from './stop-index';
 import { loadPrefs, savePrefs, type Prefs } from './prefs';
 import { parseUrlState, shareableUrl, writeUrlState, type UrlState } from './url-state';
 import { useVehicles } from './useVehicles';
@@ -43,6 +45,7 @@ import { Legend } from './components/Legend';
 import { MapControls } from './components/MapControls';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
+import { StopPanel, type SelectedStop } from './components/StopPanel';
 import type {
   Bounds,
   FilterKey,
@@ -411,6 +414,16 @@ function App() {
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
 
+  const [favoriteLines, setFavoriteLines] = useState<string[]>(
+    () => INITIAL_PREFS.favoriteLines ?? [],
+  );
+  const [selectedStop, setSelectedStop] = useState<SelectedStop | null>(null);
+  const [matchingStops, setMatchingStops] = useState<StopRecord[]>([]);
+  const [lineStatuses, setLineStatuses] = useState<Map<string, LineStatusInfo>>(() => new Map());
+  const [bearing, setBearing] = useState(0);
+  const [zenMode, setZenMode] = useState(false);
+  const lastInteractiveClickRef = useRef(0);
+
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
@@ -428,6 +441,77 @@ function App() {
   const clearSelection = useCallback(() => {
     setSelectedId(null);
     setFollowing(false);
+    setSelectedStop(null);
+  }, []);
+
+  const toggleFavoriteLine = useCallback((id: string) => {
+    setFavoriteLines((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+      savePrefs({ ...loadPrefs(), favoriteLines: next });
+      return next;
+    });
+  }, []);
+
+  const handleSelectStop = useCallback((stop: StopRecord | SelectedStop) => {
+    const map = mapRef.current;
+    const lon = 'lon' in stop ? stop.lon : stop.coordinates[0];
+    const lat = 'lat' in stop ? stop.lat : stop.coordinates[1];
+    setSelectedId(null);
+    setFollowing(false);
+    setSelectedStop({
+      id: stop.id,
+      name: stop.name,
+      coordinates: [lon, lat],
+    });
+    if (map) {
+      map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 16), duration: 1200 });
+    }
+  }, []);
+
+  const resetNorth = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.easeTo({ bearing: 0, pitch: 0, duration: 600 });
+  }, []);
+
+  const toggleZen = useCallback(() => {
+    setZenMode((prev) => !prev);
+  }, []);
+
+  const clearSelectionRef = useRef(clearSelection);
+  clearSelectionRef.current = clearSelection;
+
+  useEffect(() => {
+    const trimmed = search.trim();
+    if (trimmed.length < 2) {
+      setMatchingStops([]);
+      return;
+    }
+    let cancelled = false;
+    void searchStops(trimmed, 6).then((results) => {
+      if (!cancelled) {
+        setMatchingStops(results);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [search]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const update = async () => {
+      const statuses = await fetchLineStatuses();
+      if (!cancelled) {
+        setLineStatuses(new Map(statuses));
+      }
+    };
+    void update();
+    const timer = window.setInterval(update, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   const handleVehicleRemoved = useCallback(
@@ -557,9 +641,44 @@ function App() {
         bearing: map.getBearing(),
         pitch: map.getPitch(),
       };
+      const b = Math.round(map.getBearing());
+      setBearing((prev) => (Math.abs(prev - b) >= 1 ? b : prev));
     };
     trackCamera();
     map.on('move', trackCamera);
+
+    map.on('mouseenter', 'stops-dots', () => {
+      map.getCanvas().style.cursor = 'pointer';
+    });
+    map.on('mouseleave', 'stops-dots', () => {
+      map.getCanvas().style.cursor = '';
+    });
+    map.on('click', 'stops-dots', (event) => {
+      lastInteractiveClickRef.current = Date.now();
+      const feature = event.features?.[0];
+      if (!feature || !feature.properties) {
+        return;
+      }
+      const coords = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
+      setSelectedId(null);
+      setFollowing(false);
+      setSelectedStop({
+        id: String(feature.properties.id),
+        name: String(feature.properties.name),
+        coordinates: coords,
+      });
+    });
+
+    map.on('click', (event) => {
+      if (Date.now() - lastInteractiveClickRef.current < 150) {
+        return;
+      }
+      const features = map.queryRenderedFeatures(event.point, { layers: ['stops-dots'] });
+      if (features.length > 0) {
+        return;
+      }
+      clearSelectionRef.current();
+    });
 
     // Follow mode disengages on user gestures only: the follow loop's jumpTo
     // fires the same camera events but without originalEvent, which cleanly
@@ -569,12 +688,6 @@ function App() {
         setFollowing(false);
       }
     };
-    // `dragstart`, `pitchstart` and `rotatestart` are derived: MapLibre's
-    // handlers accumulate the input and only then move the camera. That does
-    // not survive the follow loop — `jumpTo` calls `Camera.stop()`, which calls
-    // `HandlerManager.stop()`, which calls `reset()` on every handler, so a
-    // gesture starting while following is wiped before its second event lands
-    // and none of these ever fire. Measured: a mouse drag produced `mousedown`
     // and nothing else, and a two-finger pinch produced no `zoomstart` at all.
     //
     // So the gestures that matter are caught on raw input instead — `mousemove`
@@ -880,8 +993,10 @@ function App() {
   // Clicking a vehicle both selects and follows it; a pan/zoom gesture drops
   // the follow while keeping the selection.
   const handleSelect = useCallback((row: VehicleRow) => {
+    lastInteractiveClickRef.current = Date.now();
     selectedIdRef.current = row.id;
     setSelectedId(row.id);
+    setSelectedStop(null);
     setFollowing(true);
   }, []);
 
@@ -978,9 +1093,9 @@ function App() {
 
   // Preferences: how the user likes the app, kept out of the shareable link.
   useEffect(() => {
-    const prefs: Prefs = { sidebarOpen, showRoutes, legendDismissed };
+    const prefs: Prefs = { sidebarOpen, showRoutes, legendDismissed, favoriteLines };
     savePrefs(prefs);
-  }, [sidebarOpen, showRoutes, legendDismissed]);
+  }, [sidebarOpen, showRoutes, legendDismissed, favoriteLines]);
 
   /**
    * The state as it should appear in the address bar. The camera is read from a
@@ -1376,24 +1491,47 @@ function App() {
       if (event.key === 'Escape') {
         if (typing) {
           target?.blur();
+        } else if (zenMode) {
+          setZenMode(false);
         } else {
           clearSelection();
         }
         return;
       }
-      if (event.key === '/' && !typing) {
-        event.preventDefault();
-        setSidebarOpen(true);
-        // The sidebar may have been collapsed, so the input does not exist
-        // until React has committed the reopened panel.
-        requestAnimationFrame(() => {
-          document.querySelector<HTMLInputElement>('.sidebar-search')?.focus();
-        });
+      if (!typing) {
+        if (event.key === '/' || event.key === '?') {
+          event.preventDefault();
+          setSidebarOpen(true);
+          requestAnimationFrame(() => {
+            document.querySelector<HTMLInputElement>('.sidebar-search')?.focus();
+          });
+          return;
+        }
+        if (event.key === 'z' || event.key === 'Z') {
+          event.preventDefault();
+          setZenMode((prev) => !prev);
+          return;
+        }
+        if (event.key === 'f' || event.key === 'F') {
+          if (selectedIdRef.current) {
+            event.preventDefault();
+            setFollowing((prev) => !prev);
+          }
+          return;
+        }
+        if (['1', '2', '3', '4', '5', '6'].includes(event.key)) {
+          event.preventDefault();
+          const modeKey = FILTER_ORDER[parseInt(event.key, 10) - 1];
+          if (modeKey) {
+            toggleMode(modeKey);
+          }
+          return;
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [clearSelection]);
+  }, [clearSelection, zenMode, toggleMode]);
 
   // Follow mode: one rAF loop owns the camera for as long as it runs. Centre
   // and zoom go out together in a single jumpTo per frame — an easeTo mixed in
@@ -1490,8 +1628,18 @@ function App() {
   }, [following, selectedId, mapReady, api]);
 
   return (
-    <div className="app-shell" data-basemap={phase}>
+    <div className={`app-shell${zenMode ? ' zen-mode' : ''}`} data-basemap={phase}>
       <div className="map" ref={mapContainerRef} />
+      {zenMode ? (
+        <button
+          type="button"
+          className="zen-exit-pill"
+          onClick={() => setZenMode(false)}
+          aria-label="Exit clean view"
+        >
+          Exit clean view (Z / Esc)
+        </button>
+      ) : null}
       {basemapFailed ? (
         <div className="basemap-notice panel" role="status">
           <strong>Basemap unavailable.</strong> Vehicles are still live.
@@ -1511,6 +1659,10 @@ function App() {
         onShare={handleShare}
         shareCopied={shareCopied}
         onShowLegend={showLegend}
+        bearing={bearing}
+        onResetNorth={resetNorth}
+        zenMode={zenMode}
+        onToggleZen={toggleZen}
       />
       {legendDismissed ? null : <Legend onDismiss={dismissLegend} />}
       <Sidebar
@@ -1530,6 +1682,11 @@ function App() {
         onToggleRoutes={toggleRoutes}
         basemapMode={basemapMode}
         onBasemapModeChange={setBasemapMode}
+        favoriteLines={favoriteLines}
+        onToggleFavoriteLine={toggleFavoriteLine}
+        matchingStops={matchingStops}
+        onSelectStop={handleSelectStop}
+        lineStatuses={lineStatuses}
       />
       {selectedVehicle ? (
         <InfoPanel
@@ -1541,6 +1698,13 @@ function App() {
           routeIsolated={isolatedRoute}
           onToggleIsolateRoute={toggleIsolateRoute}
           onClose={clearSelection}
+        />
+      ) : null}
+      {selectedStop ? (
+        <StopPanel
+          stop={selectedStop}
+          onClose={() => setSelectedStop(null)}
+          onSelectLine={focusLineOnMap}
         />
       ) : null}
       <StatusBar

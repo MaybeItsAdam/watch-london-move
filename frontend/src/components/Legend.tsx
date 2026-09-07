@@ -51,10 +51,12 @@ export const Legend = memo(function Legend({ onDismiss }: LegendProps) {
         <dt>Bus reds vary</dt>
         <dd>Shade is scattered per route so neighbouring buses separate. It means nothing else.</dd>
         <dt>Tap a vehicle</dt>
-        <dd>Its route, next stop and countdown; follow it, or show its route alone.</dd>
+        <dd>Its route, calling points and countdown; follow it, or show its route alone.</dd>
+        <dt>Tap a stop</dt>
+        <dd>Zoom to street level and tap any stop dot to see live arrivals and countdowns.</dd>
         <dt>Keyboard</dt>
         <dd>
-          <kbd>/</kbd> searches lines, <kbd>Esc</kbd> clears the selection.
+          <kbd>/</kbd> search, <kbd>Z</kbd> clean view, <kbd>F</kbd> follow, <kbd>1</kbd>–<kbd>6</kbd> filter modes, <kbd>Esc</kbd> clear.
         </dd>
       </dl>
     </aside>

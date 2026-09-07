@@ -1,11 +1,12 @@
 import { Geolocation } from '@capacitor/geolocation';
+import { IS_NATIVE } from './lifecycle';
 
 /**
  * Where the user is, once, as `[lon, lat]` — or null if they declined, the fix
  * timed out, or the platform cannot answer.
  *
- * Goes through Capacitor's plugin rather than `navigator.geolocation` directly,
- * on every platform, because the browser API is not actually available on
+ * Goes through Capacitor's plugin rather than `navigator.geolocation` directly
+ * on native platforms, because the browser API is not actually available on
  * either of the two this app also ships as:
  *
  * - **iOS.** WKWebView does not implement the W3C Geolocation API for
@@ -18,9 +19,8 @@ import { Geolocation } from '@capacitor/geolocation';
  *   (see AndroidManifest.xml), so on SDK 24–30 — which is our floor — the
  *   prompt resolves to denied.
  *
- * The plugin's web implementation wraps `navigator.geolocation`, so the browser
- * keeps the behaviour it always had and there is one code path rather than
- * three.
+ * In a browser tab, `navigator.geolocation` is used directly so the web build
+ * avoids a dynamic import of Capacitor's web implementation.
  *
  * Coarse and one-shot on purpose: the camera is centred at city zoom, so
  * street-level precision buys nothing and costs a larger permission prompt, a
@@ -28,6 +28,23 @@ import { Geolocation } from '@capacitor/geolocation';
  * session nobody asked to be tracked in.
  */
 export async function currentPosition(): Promise<[number, number] | null> {
+  if (!IS_NATIVE) {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      return null;
+    }
+    return new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        (position) => resolve([position.coords.longitude, position.coords.latitude]),
+        () => resolve(null),
+        {
+          enableHighAccuracy: false,
+          timeout: 8000,
+          maximumAge: 30000,
+        },
+      );
+    });
+  }
+
   try {
     const position = await Geolocation.getCurrentPosition({
       enableHighAccuracy: false,

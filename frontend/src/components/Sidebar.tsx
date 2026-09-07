@@ -2,6 +2,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { FILTER_COLORS, FILTER_LABELS, FILTER_ORDER } from '../config';
 import type { BasemapMode } from '../config';
 import type { FilterKey, LineSummary } from '../types';
+import type { LineStatusInfo } from '../line-status';
+import type { StopRecord } from '../stop-index';
 import { VIRTUALIZE_ABOVE_ROWS, rowWindow } from '../window-rows';
 
 const BASEMAP_MODES: { key: BasemapMode; label: string }[] = [
@@ -28,6 +30,11 @@ type SidebarProps = {
   onToggleRoutes: () => void;
   basemapMode: BasemapMode;
   onBasemapModeChange: (mode: BasemapMode) => void;
+  favoriteLines: string[];
+  onToggleFavoriteLine: (id: string) => void;
+  matchingStops: StopRecord[];
+  onSelectStop: (stop: StopRecord) => void;
+  lineStatuses: Map<string, LineStatusInfo>;
 };
 
 /* Drawn rather than set as ☰ / ✕: neither character is in the iOS system font,
@@ -121,8 +128,14 @@ export const Sidebar = memo(function Sidebar({
   onToggleRoutes,
   basemapMode,
   onBasemapModeChange,
+  favoriteLines,
+  onToggleFavoriteLine,
+  matchingStops,
+  onSelectStop,
+  lineStatuses,
 }: SidebarProps) {
   const selected = useMemo(() => new Set(selectedLines), [selectedLines]);
+  const favoriteSet = useMemo(() => new Set(favoriteLines), [favoriteLines]);
 
   const visibleLines = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -130,6 +143,11 @@ export const Sidebar = memo(function Sidebar({
       (line) => filters[line.group] && (needle === '' || matches(line, needle)),
     );
   }, [lines, filters, search]);
+
+  const pinnedLines = useMemo(() => {
+    if (favoriteLines.length === 0) return [];
+    return lines.filter((line) => favoriteSet.has(line.id));
+  }, [lines, favoriteSet, favoriteLines.length]);
 
   // --- windowing -----------------------------------------------------------
   //
@@ -174,19 +192,47 @@ export const Sidebar = memo(function Sidebar({
   const slice = rowWindow(total, scrollTop, windowed ? viewportHeight : 0, stride);
   const rendered = windowed ? visibleLines.slice(slice.first, slice.last) : visibleLines;
 
-  const renderRow = (line: LineSummary) => (
-    <button
-      key={line.id}
-      className={`line-row${selected.has(line.id) ? ' selected' : ''}`}
-      onClick={() => onToggleLine(line.id)}
-      aria-pressed={selected.has(line.id)}
-    >
-      <span className="line-swatch" style={{ background: line.color }} />
-      <span className="line-label">{line.label}</span>
-      <span className="line-group">{FILTER_LABELS[line.group]}</span>
-      <span className="line-count">{line.count}</span>
-    </button>
-  );
+  const renderRow = (line: LineSummary) => {
+    const isFav = favoriteSet.has(line.id);
+    const status = lineStatuses.get(line.id);
+
+    return (
+      <div
+        key={line.id}
+        className={`line-row${selected.has(line.id) ? ' selected' : ''}`}
+      >
+        <button
+          type="button"
+          className="line-row-main"
+          onClick={() => onToggleLine(line.id)}
+          aria-pressed={selected.has(line.id)}
+        >
+          <span className="line-swatch" style={{ background: line.color }} />
+          <span className="line-label">{line.label}</span>
+          {status ? (
+            <span
+              className={`line-status-dot ${status.level}`}
+              title={`${line.label}: ${status.description}${status.reason ? ` — ${status.reason}` : ''}`}
+            />
+          ) : null}
+          <span className="line-group">{FILTER_LABELS[line.group]}</span>
+          <span className="line-count">{line.count}</span>
+        </button>
+        <button
+          type="button"
+          className={`star-button${isFav ? ' active' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFavoriteLine(line.id);
+          }}
+          aria-label={isFav ? `Unpin ${line.label}` : `Pin ${line.label}`}
+          title={isFav ? 'Unpin route' : 'Pin route'}
+        >
+          ★
+        </button>
+      </div>
+    );
+  };
 
   if (!open) {
     return (
@@ -204,8 +250,6 @@ export const Sidebar = memo(function Sidebar({
   return (
     <aside className="sidebar panel" aria-label="Vehicle filters">
       <div className="sidebar-head">
-        {/* Counts come from what the backend streams, which is now scoped to
-            the viewport — so they are what is on screen, not the whole network. */}
         <span className="sidebar-title">Vehicles in view</span>
         <button
           className="icon-button"
@@ -217,23 +261,24 @@ export const Sidebar = memo(function Sidebar({
         </button>
       </div>
 
-      {/* Enter narrows the map to the top match rather than only the list.
-          The placeholder has always promised to "search a line", and filtering
-          a list beside the map while the map itself ignored you was the gap
-          between what it said and what it did. */}
       <input
         className="sidebar-search"
         type="search"
         value={search}
         onChange={(event) => onSearchChange(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' && visibleLines.length > 0) {
-            event.preventDefault();
-            onFocusLine(visibleLines[0].id);
+          if (event.key === 'Enter') {
+            if (matchingStops.length > 0) {
+              event.preventDefault();
+              onSelectStop(matchingStops[0]);
+            } else if (visibleLines.length > 0) {
+              event.preventDefault();
+              onFocusLine(visibleLines[0].id);
+            }
           }
         }}
-        placeholder="Search a line or bus route"
-        aria-label="Search a line or bus route. Press Enter to show the top match on the map."
+        placeholder="Search lines, routes or stations…"
+        aria-label="Search a line, bus route or station. Press Enter to select top match."
       />
 
       <div className="mode-chips">
@@ -251,6 +296,25 @@ export const Sidebar = memo(function Sidebar({
         ))}
       </div>
 
+      {pinnedLines.length > 0 ? (
+        <div className="pinned-lines-bar">
+          <span className="pinned-label">Pinned:</span>
+          <div className="pinned-chips">
+            {pinnedLines.map((line) => (
+              <button
+                key={line.id}
+                className={`pinned-chip${selected.has(line.id) ? ' active' : ''}`}
+                onClick={() => onToggleLine(line.id)}
+                title={`Toggle ${line.label}`}
+              >
+                <span className="pinned-swatch" style={{ background: line.color }} />
+                <span>{line.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       <div className="sidebar-actions">
         <button
           className={`pill-button${showRoutes ? ' active' : ''}`}
@@ -259,7 +323,6 @@ export const Sidebar = memo(function Sidebar({
         >
           routes
         </button>
-        {/* Auto follows the sun over London: bright by day, dark at night. */}
         <div className="segmented" role="group" aria-label="Basemap">
           {BASEMAP_MODES.map((mode) => (
             <button
@@ -279,18 +342,34 @@ export const Sidebar = memo(function Sidebar({
         ) : null}
       </div>
 
+      {matchingStops.length > 0 ? (
+        <div className="search-stops-container">
+          <span className="search-stops-heading">Stations & Stops ({matchingStops.length})</span>
+          <div className="search-stops-list">
+            {matchingStops.map((stop) => (
+              <button
+                key={stop.id}
+                className="search-stop-item"
+                onClick={() => onSelectStop(stop)}
+              >
+                <span className="search-stop-icon" aria-hidden="true">🚏</span>
+                <span className="search-stop-name">{stop.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       <div
         className="line-list"
         ref={listRef}
         onScroll={windowed ? onScroll : undefined}
       >
-        {total === 0 ? (
+        {total === 0 && matchingStops.length === 0 ? (
           <p className="line-empty">
-            {lines.length === 0 ? 'Waiting for vehicle data…' : 'No routes match that search.'}
+            {lines.length === 0 ? 'Waiting for vehicle data…' : 'No routes or stations match that search.'}
           </p>
         ) : windowed ? (
-          // The sizer holds the full scroll height so the scrollbar tells the
-          // truth; only the visible slice exists, translated into place.
           <div className="line-list-sizer" style={{ height: slice.height }}>
             <div
               className="line-list-window"

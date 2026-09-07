@@ -13,6 +13,7 @@ import {
   cellIdFor,
   decodeStopIndex,
   queryStopIndex,
+  searchStopIndex,
   stopAt,
   type StopRecord,
 } from './stop-index';
@@ -260,5 +261,13 @@ describe('the shipped stops.bin', () => {
         expect(cellIdFor(index.lat[i], index.lon[i], index.cellDeg)).toBe(index.cellId[k]);
       }
     }
+  });
+
+  it('searches stops by name and deduplicates matches', () => {
+    const index = decodeStopIndex(buffer);
+    const results = searchStopIndex(index, 'Waterloo', 5);
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.length).toBeLessThanOrEqual(5);
+    expect(results.some((s) => s.name.toLowerCase().includes('waterloo'))).toBe(true);
   });
 });

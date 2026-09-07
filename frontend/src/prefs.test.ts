@@ -14,7 +14,12 @@ describe('prefs', () => {
   });
 
   it('round-trips', () => {
-    const prefs = { sidebarOpen: false, showRoutes: false, legendDismissed: true };
+    const prefs = {
+      sidebarOpen: false,
+      showRoutes: false,
+      legendDismissed: true,
+      favoriteLines: ['73', 'victoria'],
+    };
     savePrefs(prefs);
     expect(loadPrefs()).toEqual(prefs);
   });

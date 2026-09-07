@@ -4,6 +4,7 @@ import manifest from './static-data-manifest.json';
 import {
   decodeStopIndex,
   queryStopIndex,
+  searchStopIndex,
   type StopIndex,
   type StopRecord,
 } from './stop-index';
@@ -281,4 +282,15 @@ export async function loadStops(bounds: Bounds): Promise<StopRecord[] | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Search stops by name across the bundled index.
+ */
+export async function searchStops(query: string, limit = 8): Promise<StopRecord[]> {
+  const index = await ensureStopIndex();
+  if (!index) {
+    return [];
+  }
+  return searchStopIndex(index, query, limit);
 }

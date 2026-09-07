@@ -90,6 +90,20 @@ export const InfoPanel = memo(function InfoPanel({
           {countdown ? <span className="countdown"> {countdown}</span> : null}
         </p>
       ) : null}
+      {detail?.next_stops && detail.next_stops.length > 1 ? (
+        <div className="info-timeline">
+          <span className="timeline-title">Route calling points:</span>
+          <ol className="timeline-stops">
+            {detail.next_stops.slice(0, 5).map((stop, idx) => (
+              <li key={`${stop.lat},${stop.lon}-${idx}`} className={`timeline-stop${idx === 0 ? ' current' : ''}`}>
+                <span className="timeline-bullet" />
+                <span className="timeline-name">{stop.name}</span>
+                {idx === 0 && countdown ? <span className="timeline-countdown">{countdown}</span> : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
       <p className="info-age">updated {ageSeconds}s ago</p>
       <div className="info-actions">
         <button
