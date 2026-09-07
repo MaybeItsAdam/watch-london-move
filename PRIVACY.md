@@ -27,10 +27,10 @@ We do not collect, store or transmit personal data about you.
   is unaffected. Nothing else in the App reads your location, and there is no
   background or continuous location tracking of any kind. The Android build
   requests `INTERNET` and `ACCESS_COARSE_LOCATION` (approximate, not precise);
-  the iOS build declares `NSLocationWhenInUseUsageDescription` for the same
-  control. Because your position never leaves the device, it is not "collected"
-  in the sense either app store uses, which is why the App's store privacy
-  labels declare no data collection. The map otherwise shows you where
+  the iOS build declares `NSLocationWhenInUseUsageDescription` and
+  `NSLocationAlwaysAndWhenInUseUsageDescription` for the same control. Because your
+  position never leaves the device, it is not "collected" in the sense either app
+  store uses, which is why the App's store privacy labels declare no data collection.
   *vehicles* are, not where you are.
 * **No analytics, tracking or advertising.** There is no analytics SDK, no
   tracking pixel, no advertising network, and nothing is shared with data

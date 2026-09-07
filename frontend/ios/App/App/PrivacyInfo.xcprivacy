@@ -19,8 +19,9 @@
      presses the "centre the map on my location" control, uses it immediately to
      move the camera, and never stores or transmits it. Apple's "collect" means
      transmitted off the device, so this stays empty. What location *does*
-     require is the NSLocationWhenInUseUsageDescription string in Info.plist,
-     which is there. Adding a data type here that the app does not collect would
+     require is the NSLocationWhenInUseUsageDescription and
+     NSLocationAlwaysAndWhenInUseUsageDescription strings in Info.plist,
+     which are there. Adding a data type here that the app does not collect would
      be as inaccurate as omitting one that it does.
 
   2. NSPrivacyAccessedAPITypes covers the "required reason" APIs the Capacitor
