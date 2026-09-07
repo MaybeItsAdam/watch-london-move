@@ -1,3 +1,10 @@
+## [0.7.1](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.7.0...v0.7.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **ios:** add NSLocationAlwaysAndWhenInUseUsageDescription to Info.plist ([210468b](https://github.com/MaybeItsSoftware/watch-london-move/commit/210468b85ec8e45c4b4ac7b10c8b518768b309b0))
+
 # [0.7.0](https://github.com/MaybeItsSoftware/watch-london-move/compare/v0.6.0...v0.7.0) (2026-09-07)
 
 
